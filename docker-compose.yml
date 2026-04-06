@@ -1,0 +1,22 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8095:8095"
+    environment:
+      NODE_ENV: production
+
+  realtime:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["node", "server/realtime-proxy.mjs"]
+    ports:
+      - "127.0.0.1:8096:3001"
+    environment:
+      NODE_ENV: production
+      REALTIME_PROXY_PORT: "3001"
