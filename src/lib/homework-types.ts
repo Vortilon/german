@@ -13,6 +13,8 @@ export type WordFeedback = "none" | "green" | "blue" | "red";
 
 export interface HomeworkProgress {
   step: HomeworkProgressStep;
+  /** Highest step index (0–8) the player has unlocked; used for navigation. */
+  furthest_index?: number;
   started_at?: string;
   /** Per normalized word index → feedback */
   word_feedback?: Record<string, WordFeedback>;

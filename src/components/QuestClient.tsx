@@ -17,6 +17,12 @@ import { fetchHomeworkWeek, upsertHomeworkWeek } from "@/lib/homework-db";
 import { getWeekStartIso } from "@/lib/week";
 import { VOICE_AGENT_SYSTEM } from "@/lib/prompts";
 import { PrankReward } from "@/components/PrankReward";
+import {
+  QUEST_STEP_LABELS,
+  QUEST_STEP_ORDER,
+  inferFurthestIndex,
+  stepIndex,
+} from "@/lib/quest-steps";
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -67,18 +73,6 @@ async function playTts(text: string, language: "de" | "en") {
   URL.revokeObjectURL(url);
 }
 
-const STEP_ORDER: HomeworkProgressStep[] = [
-  "a_upload",
-  "b_notebook",
-  "c_guide",
-  "d_interactive",
-  "e_read_aloud",
-  "f_user_read",
-  "g_repeat_spelling",
-  "h_report",
-  "done",
-];
-
 function localStorageKey(userId: string, week: string) {
   return `elio_german_homework_${userId}_${week}`;
 }
@@ -98,6 +92,7 @@ export function QuestClient({
   const [extracted, setExtracted] = useState<ExtractedHomework | null>(null);
   const [progress, setProgress] = useState<HomeworkProgress>({
     step: "a_upload",
+    furthest_index: 0,
     word_feedback: {},
     weak_word_indices: [],
     time_spent_sec: 0,
@@ -195,7 +190,13 @@ export function QuestClient({
               parent_report?: ParentReport | null;
             };
             if (bundle.extracted) setExtracted(bundle.extracted);
-            if (bundle.progress) setProgress(bundle.progress);
+            if (bundle.progress) {
+              const bp = bundle.progress as HomeworkProgress;
+              setProgress({
+                ...bp,
+                furthest_index: inferFurthestIndex(bp.step, bp.furthest_index),
+              });
+            }
             if (bundle.handwriting) setHandwriting(bundle.handwriting);
             if (bundle.parent_report) setParentReport(bundle.parent_report);
           }
@@ -212,7 +213,13 @@ export function QuestClient({
       try {
         const row = await fetchHomeworkWeek(supabase, user.id, weekStart);
         if (row?.extracted) setExtracted(row.extracted);
-        if (row?.progress) setProgress(row.progress as HomeworkProgress);
+        if (row?.progress) {
+          const rp = row.progress as HomeworkProgress;
+          setProgress({
+            ...rp,
+            furthest_index: inferFurthestIndex(rp.step, rp.furthest_index),
+          });
+        }
         if (row?.handwriting) setHandwriting(row.handwriting);
         if (row?.parent_report) setParentReport(row.parent_report as ParentReport);
       } catch (e) {
@@ -223,13 +230,29 @@ export function QuestClient({
     })();
   }, [useLocal, supabase, user.id, weekStart]);
 
-  function setStep(step: HomeworkProgressStep) {
+  function goToStep(next: HomeworkProgressStep) {
     setProgress((p) => {
-      const n = { ...p, step };
+      const i = stepIndex(next);
+      const prevFur = inferFurthestIndex(p.step, p.furthest_index);
+      const furthest_index = Math.max(prevFur, i);
+      const n = { ...p, step: next, furthest_index };
       void persist({ progress: n });
       return n;
     });
   }
+
+  function navigateToStep(target: HomeworkProgressStep) {
+    setProgress((p) => {
+      const targetI = stepIndex(target);
+      const fur = inferFurthestIndex(p.step, p.furthest_index);
+      if (targetI > fur) return p;
+      const n = { ...p, step: target };
+      void persist({ progress: n });
+      return n;
+    });
+  }
+
+  const furthestUnlocked = inferFurthestIndex(progress.step, progress.furthest_index);
 
   async function runVisionHomework() {
     setErr(null);
@@ -244,7 +267,7 @@ export function QuestClient({
       const json = (await res.json()) as { ok?: boolean; extracted?: ExtractedHomework; error?: string };
       if (!res.ok || !json.ok || !json.extracted) throw new Error(json.error || "Vision failed");
       setExtracted(json.extracted);
-      setStep("b_notebook");
+      goToStep("b_notebook");
       setRewardTick((x) => x + 1);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Upload failed");
@@ -275,7 +298,7 @@ export function QuestClient({
       if (!res.ok || !json.ok || !json.handwriting) throw new Error(json.error || "Vision failed");
       setHandwriting(json.handwriting);
       void persist({ handwriting: json.handwriting });
-      setStep("c_guide");
+      goToStep("c_guide");
       setRewardTick((x) => x + 1);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Notebook failed");
@@ -419,8 +442,12 @@ export function QuestClient({
     setProgress((p) => {
       const r = buildParentReport(p);
       setParentReport(r);
-      void persist({ parent_report: r, progress: { ...p, step: "h_report" } });
-      return { ...p, step: "h_report" };
+      const i = stepIndex("h_report");
+      const prevFur = inferFurthestIndex(p.step, p.furthest_index);
+      const furthest_index = Math.max(prevFur, i);
+      const n = { ...p, step: "h_report" as const, furthest_index };
+      void persist({ parent_report: r, progress: n });
+      return n;
     });
   }
 
@@ -530,38 +557,81 @@ export function QuestClient({
           </div>
         </div>
 
-        <div className="mt-3 flex flex-wrap gap-2">
-          {STEP_ORDER.map((s) => (
-            <span
-              key={s}
-              className={`rounded-full px-2 py-1 text-xs font-bold ${
-                s === step ? "bg-[#f4d03f] text-[#2d1f18]" : "bg-black/20"
-              }`}
-            >
-              {s}
-            </span>
-          ))}
-        </div>
+        <nav
+          className="mt-3 flex flex-wrap gap-2"
+          aria-label="Quest steps — tap a step you have unlocked"
+        >
+          {QUEST_STEP_ORDER.map((id) => {
+            const idx = stepIndex(id);
+            const locked = idx > furthestUnlocked;
+            const current = id === step;
+            return (
+              <button
+                key={id}
+                type="button"
+                disabled={locked}
+                title={locked ? "Finish earlier steps first" : QUEST_STEP_LABELS[id]}
+                onClick={() => !locked && navigateToStep(id)}
+                className={`rounded-full px-3 py-2 text-left text-xs font-bold transition sm:text-sm ${
+                  current ? "bg-[#f4d03f] text-[#2d1f18] ring-2 ring-[#2d1f18]" : ""
+                } ${
+                  locked ?
+                    "cursor-not-allowed bg-black/10 text-white/40"
+                  : "cursor-pointer bg-black/25 text-white hover:bg-black/35"
+                } `}
+              >
+                {QUEST_STEP_LABELS[id]}
+              </button>
+            );
+          })}
+        </nav>
       </header>
 
       {err ? (
         <div className="rounded-xl border-2 border-red-300 bg-red-900/40 p-3 text-sm">{err}</div>
       ) : null}
 
+      {step !== "a_upload" && !extracted && step !== "done" ? (
+        <div className="rounded-xl border-2 border-amber-300 bg-amber-900/30 p-4 text-sm">
+          <p className="font-bold">Scan your homework sheet first.</p>
+          <button
+            type="button"
+            className="mt-3 rounded-lg bg-[#f4d03f] px-4 py-2 font-black text-[#2d1f18]"
+            onClick={() => navigateToStep("a_upload")}
+          >
+            Go to homework photo
+          </button>
+        </div>
+      ) : null}
+
       {/* a */}
       {step === "a_upload" && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">a) Homework sheet photo</h2>
+          <h2 className="text-xl font-black">Homework sheet photo</h2>
           <p className="mt-2 text-sm text-white/90">
             Ask a grown-up to take a clear photo of the whole sheet.
           </p>
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            className="mt-4 block w-full text-lg"
-            onChange={(e) => setHwFiles(Array.from(e.target.files || []))}
-          />
+          <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              multiple
+              className="sr-only"
+              onChange={(e) => setHwFiles(Array.from(e.target.files || []))}
+            />
+            <span className="text-lg font-black">📷 Tap here to add photos</span>
+            <span className="mt-1 text-sm font-semibold text-white/85">
+              Use camera or photo library — you can pick several pictures
+            </span>
+          </label>
+          {hwFiles.length > 0 ? (
+            <ul className="mt-3 space-y-1 rounded-lg bg-black/20 px-3 py-2 text-sm">
+              {hwFiles.map((f) => (
+                <li key={f.name + f.size}>✓ {f.name}</li>
+              ))}
+            </ul>
+          ) : null}
           <button
             type="button"
             disabled={!hwFiles.length || !!busy}
@@ -576,17 +646,31 @@ export function QuestClient({
       {/* b */}
       {step === "b_notebook" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">b) Copy into notebook</h2>
+          <h2 className="text-xl font-black">Notebook copy</h2>
           <p className="mt-2 text-sm">
             Copy the German text. Take 1–2 photos. Grok checks handwriting.
           </p>
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            className="mt-4 block w-full text-lg"
-            onChange={(e) => setNbFiles(Array.from(e.target.files || []))}
-          />
+          <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              multiple
+              className="sr-only"
+              onChange={(e) => setNbFiles(Array.from(e.target.files || []))}
+            />
+            <span className="text-lg font-black">📷 Tap here to photograph your writing</span>
+            <span className="mt-1 text-sm font-semibold text-white/85">
+              1 or 2 clear pictures of your notebook page
+            </span>
+          </label>
+          {nbFiles.length > 0 ? (
+            <ul className="mt-3 space-y-1 rounded-lg bg-black/20 px-3 py-2 text-sm">
+              {nbFiles.map((f) => (
+                <li key={f.name + f.size}>✓ {f.name}</li>
+              ))}
+            </ul>
+          ) : null}
           <div className="mt-4 flex flex-col gap-2">
             <button
               type="button"
@@ -599,7 +683,7 @@ export function QuestClient({
             <button
               type="button"
               className="w-full rounded-xl border-2 border-white/40 py-3 font-bold"
-              onClick={() => setStep("c_guide")}
+              onClick={() => goToStep("c_guide")}
             >
               Skip for now
             </button>
@@ -610,7 +694,7 @@ export function QuestClient({
       {/* c */}
       {step === "c_guide" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">c) What to do</h2>
+          <h2 className="text-xl font-black">What to do</h2>
           <ul className="mt-3 list-decimal pl-6 text-sm">
             {extracted.instructions.map((x, i) => (
               <li key={i} className="mb-1">
@@ -624,7 +708,7 @@ export function QuestClient({
           <button
             type="button"
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
-            onClick={() => setStep("d_interactive")}
+            onClick={() => goToStep("d_interactive")}
           >
             Continue
           </button>
@@ -634,7 +718,7 @@ export function QuestClient({
       {/* d */}
       {step === "d_interactive" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">d) Tap words</h2>
+          <h2 className="text-xl font-black">Tap words</h2>
           <p className="mt-2 text-sm">Hover: English tip. Click: hear German.</p>
           <p className="mt-4 text-2xl leading-relaxed">
             {words.map(({ w, i }) => (
@@ -653,7 +737,7 @@ export function QuestClient({
           <button
             type="button"
             className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
-            onClick={() => setStep("e_read_aloud")}
+            onClick={() => goToStep("e_read_aloud")}
           >
             Next: read aloud
           </button>
@@ -663,7 +747,7 @@ export function QuestClient({
       {/* e */}
       {step === "e_read_aloud" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">e) Listen (sentence by sentence)</h2>
+          <h2 className="text-xl font-black">Listen (one sentence at a time)</h2>
           <p className="mt-2 text-sm text-white/90">
             Highlight moves after each sentence (Grok TTS).
           </p>
@@ -681,7 +765,7 @@ export function QuestClient({
           <button
             type="button"
             className="mt-3 w-full rounded-xl border-2 border-white/30 py-3 font-bold"
-            onClick={() => setStep("f_user_read")}
+            onClick={() => goToStep("f_user_read")}
           >
             Next: you read
           </button>
@@ -691,7 +775,7 @@ export function QuestClient({
       {/* f */}
       {step === "f_user_read" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">f) You read — word highlight</h2>
+          <h2 className="text-xl font-black">You read</h2>
           <p className="mt-2 text-sm">
             Tap the word you are on while you read. For full Grok listening, connect voice
             (proxy).
@@ -735,7 +819,7 @@ export function QuestClient({
           <button
             type="button"
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
-            onClick={() => setStep("g_repeat_spelling")}
+            onClick={() => goToStep("g_repeat_spelling")}
           >
             Next: repeat & spell
           </button>
@@ -745,7 +829,7 @@ export function QuestClient({
       {/* g */}
       {step === "g_repeat_spelling" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">g) Pronunciation colors + spelling</h2>
+          <h2 className="text-xl font-black">Practice & spelling</h2>
           <p className="mt-2 text-sm">
             Tap a color for each word. When ready, start the spelling game.
           </p>
@@ -830,14 +914,14 @@ export function QuestClient({
       {/* h */}
       {(step === "h_report" || step === "done") && parentReport && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">h) Parent report</h2>
+          <h2 className="text-xl font-black">Parent report</h2>
           <pre className="mt-4 overflow-auto rounded-lg bg-black/30 p-4 text-sm leading-relaxed">
             {JSON.stringify(parentReport, null, 2)}
           </pre>
           <button
             type="button"
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 font-black text-[#2d1f18]"
-            onClick={() => setStep("done")}
+            onClick={() => goToStep("done")}
           >
             Done
           </button>

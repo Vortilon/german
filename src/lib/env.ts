@@ -1,5 +1,7 @@
 export const env = {
   XAI_API_KEY: process.env.textXAI_API_KEY ?? "",
+  /** Preferred vision model; API may deprecate names — see xai vision fallback in API routes. */
+  XAI_VISION_MODEL: process.env.XAI_VISION_MODEL ?? "",
   SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
   SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",

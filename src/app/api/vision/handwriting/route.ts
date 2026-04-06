@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { parseJsonFromModelContent, xaiChatCompletionText } from "@/lib/xai";
+import { parseJsonFromModelContent } from "@/lib/xai";
+import { base64ToImageDataUrl, xaiVisionCompletionText } from "@/lib/xai-vision";
 import { VISION_HANDWRITING_FEEDBACK } from "@/lib/prompts";
 import type { HandwritingResult } from "@/lib/homework-types";
 
@@ -24,13 +25,12 @@ export async function POST(req: Request) {
       ...body.images_base64.slice(0, 2).map((b64) => ({
         type: "image_url" as const,
         image_url: {
-          url: `data:image/jpeg;base64,${b64.replace(/^data:image\/\w+;base64,/, "")}`,
+          url: base64ToImageDataUrl(b64, "image/png"),
         },
       })),
     ];
 
-    const text = await xaiChatCompletionText({
-      model: "grok-2-vision-1212",
+    const { text } = await xaiVisionCompletionText({
       temperature: 0.2,
       messages: [{ role: "user", content }],
     });
