@@ -26,16 +26,33 @@ export interface HomeworkProgress {
 
 export interface ExtractedHomework {
   title: string;
+  /** The main passage Elio must learn—ignore side doodles, headers, or unrelated lines unless they are the assigned text. */
   full_german_text: string;
   instructions: string[];
   special_words: { de: string; en: string }[];
   teacher_notes?: string;
   lines: string[];
+  /** One English translation per entry in `lines` (same order). */
+  sentence_translations_en?: string[];
+  /** Short English summary of what the teacher wants (copy, memorize, answer questions, etc.). */
+  main_task_summary_en?: string;
+}
+
+export interface HandwritingWordCheck {
+  /** Same index as tokenizeWords on expected text. */
+  word_index: number;
+  word_expected: string;
+  word_seen: string;
+  ok: boolean;
+  /** What is wrong + how to fix (English): capitalization, missing letters, punctuation, etc. */
+  hint_en: string;
 }
 
 export interface HandwritingResult {
   is_acceptable: boolean;
   summary: string;
+  /** Per-word match vs expected text; green/red UI. */
+  word_checks?: HandwritingWordCheck[];
   fixes: Array<{
     issue: string;
     what: string;

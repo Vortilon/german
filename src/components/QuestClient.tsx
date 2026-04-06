@@ -23,6 +23,20 @@ import {
   inferFurthestIndex,
   stepIndex,
 } from "@/lib/quest-steps";
+import { GermanWordBlock } from "@/components/GermanWordBlock";
+import { playTts } from "@/lib/play-tts";
+import {
+  sentenceEnglishLines,
+  sentencesFromExtracted,
+  tokenizeWords,
+} from "@/lib/tokenize";
+import { compressImageToJpegDataUrl } from "@/lib/compress-image-client";
+import {
+  loadNotebookAttempts,
+  notebookAttemptsStorageKey,
+  saveNotebookAttempts,
+  type NotebookAttempt,
+} from "@/lib/notebook-attempts";
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -37,44 +51,16 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-function tokenizeWords(text: string): { w: string; i: number }[] {
-  const out: { w: string; i: number }[] = [];
-  let i = 0;
-  for (const raw of text.split(/\s+/)) {
-    const w = raw.replace(/[.,!?;:«»"„"()]/g, "");
-    if (w.length) out.push({ w, i: i++ });
-  }
-  return out;
-}
-
-function sentencesFromExtracted(ex: ExtractedHomework): string[] {
-  if (ex.lines?.length) return ex.lines.map((l) => l.trim()).filter(Boolean);
-  return ex.full_german_text
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-async function playTts(text: string, language: "de" | "en") {
-  const res = await fetch("/api/tts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, language }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-  await audio.play();
-  await new Promise<void>((resolve, reject) => {
-    audio.onended = () => resolve();
-    audio.onerror = () => reject(new Error("audio error"));
-  });
-  URL.revokeObjectURL(url);
-}
-
 function localStorageKey(userId: string, week: string) {
   return `elio_german_homework_${userId}_${week}`;
+}
+
+function relativeNotebookTime(ts: number) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 45) return "Just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} day(s) ago`;
 }
 
 export function QuestClient({
@@ -85,6 +71,10 @@ export function QuestClient({
   persistence: AppPersistence;
 }) {
   const weekStart = useMemo(() => getWeekStartIso(), []);
+  const notebookAttemptsKey = useMemo(
+    () => notebookAttemptsStorageKey(user.id, weekStart),
+    [user.id, weekStart],
+  );
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const useLocal = persistence === "local";
 
@@ -99,6 +89,9 @@ export function QuestClient({
   });
   const [handwriting, setHandwriting] = useState<HandwritingResult | null>(null);
   const [parentReport, setParentReport] = useState<ParentReport | null>(null);
+  /** Short-lived client history (48h); photos + AI feedback per upload. */
+  const [notebookAttempts, setNotebookAttempts] = useState<NotebookAttempt[]>([]);
+  const notebookFeedbackRef = useRef<HTMLDivElement>(null);
 
   const [hwFiles, setHwFiles] = useState<File[]>([]);
   const [nbFiles, setNbFiles] = useState<File[]>([]);
@@ -106,7 +99,6 @@ export function QuestClient({
   const [err, setErr] = useState<string | null>(null);
   const [rewardTick, setRewardTick] = useState(0);
 
-  const [readIdx, setReadIdx] = useState(0);
   const [highlightSentence, setHighlightSentence] = useState(0);
   const [spellTarget, setSpellTarget] = useState<{ word: string; idx: number } | null>(
     null,
@@ -117,6 +109,24 @@ export function QuestClient({
 
   const startedRef = useRef<number | null>(null);
   const [voiceEvents, setVoiceEvents] = useState<string[]>([]);
+
+  /** After scan: confirm or edit text before notebook. */
+  const [pendingSheetReview, setPendingSheetReview] = useState(false);
+  const [draftFullText, setDraftFullText] = useState("");
+  useEffect(() => {
+    if (extracted?.full_german_text) setDraftFullText(extracted.full_german_text);
+  }, [extracted?.full_german_text]);
+
+  const [readAloudSpeed, setReadAloudSpeed] = useState(0.78);
+  const [fSentenceIdx, setFSentenceIdx] = useState(0);
+
+  useEffect(() => {
+    if (!extracted) return;
+    const n = sentencesFromExtracted(extracted).length;
+    if (n <= 0) return;
+    setHighlightSentence((h) => Math.min(h, n - 1));
+    setFSentenceIdx((i) => Math.min(i, n - 1));
+  }, [extracted]);
 
   useEffect(() => {
     startedRef.current = Date.now();
@@ -230,6 +240,11 @@ export function QuestClient({
     })();
   }, [useLocal, supabase, user.id, weekStart]);
 
+  useEffect(() => {
+    if (!loaded) return;
+    setNotebookAttempts(loadNotebookAttempts(notebookAttemptsKey));
+  }, [loaded, notebookAttemptsKey]);
+
   function goToStep(next: HomeworkProgressStep) {
     setProgress((p) => {
       const i = stepIndex(next);
@@ -254,6 +269,21 @@ export function QuestClient({
 
   const furthestUnlocked = inferFurthestIndex(progress.step, progress.furthest_index);
 
+  function confirmSheetToNotebook() {
+    if (!extracted) return;
+    const full = draftFullText.trim();
+    const lines = full.split("\n").map((l) => l.trim()).filter(Boolean);
+    const next: ExtractedHomework = {
+      ...extracted,
+      full_german_text: full || extracted.full_german_text,
+      lines: lines.length > 0 ? lines : [full || extracted.full_german_text],
+    };
+    setExtracted(next);
+    void persist({ extracted: next });
+    setPendingSheetReview(false);
+    goToStep("b_notebook");
+  }
+
   async function runVisionHomework() {
     setErr(null);
     setBusy("Reading your sheet…");
@@ -267,7 +297,8 @@ export function QuestClient({
       const json = (await res.json()) as { ok?: boolean; extracted?: ExtractedHomework; error?: string };
       if (!res.ok || !json.ok || !json.extracted) throw new Error(json.error || "Vision failed");
       setExtracted(json.extracted);
-      goToStep("b_notebook");
+      setDraftFullText(json.extracted.full_german_text);
+      setPendingSheetReview(true);
       setRewardTick((x) => x + 1);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Upload failed");
@@ -281,7 +312,11 @@ export function QuestClient({
     setErr(null);
     setBusy("Checking notebook…");
     try {
-      const images = await Promise.all(nbFiles.slice(0, 2).map(fileToBase64));
+      const files = nbFiles.slice(0, 2);
+      const images = await Promise.all(files.map(fileToBase64));
+      const imageDataUrls = (
+        await Promise.all(files.map((f) => compressImageToJpegDataUrl(f)))
+      ).filter((u): u is string => !!u);
       const res = await fetch("/api/vision/handwriting", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -296,10 +331,25 @@ export function QuestClient({
         error?: string;
       };
       if (!res.ok || !json.ok || !json.handwriting) throw new Error(json.error || "Vision failed");
-      setHandwriting(json.handwriting);
-      void persist({ handwriting: json.handwriting });
-      goToStep("c_guide");
+      const hw = json.handwriting;
+      const attempt: NotebookAttempt = {
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `nb-${Date.now()}`,
+        createdAt: Date.now(),
+        imageDataUrls,
+        handwriting: hw,
+      };
+      setHandwriting(hw);
+      void persist({ handwriting: hw });
+      setNotebookAttempts((prev) => {
+        const next = [attempt, ...prev];
+        saveNotebookAttempts(notebookAttemptsKey, next);
+        return next;
+      });
+      setNbFiles([]);
       setRewardTick((x) => x + 1);
+      requestAnimationFrame(() => {
+        notebookFeedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Notebook failed");
     } finally {
@@ -312,33 +362,66 @@ export function QuestClient({
     [extracted],
   );
 
-  const meaningMap = useMemo(() => {
-    const m = new Map<string, string>();
-    extracted?.special_words.forEach((x) => m.set(x.de.toLowerCase(), x.en));
-    return m;
-  }, [extracted]);
+  function notebookWordTiles(hw: HandwritingResult) {
+    const checks = hw.word_checks;
+    if (!checks?.length) {
+      return (
+        <p className="mt-2 text-xs text-white/60">
+          Word-by-word data was not returned — compare the two text boxes above.
+        </p>
+      );
+    }
+    return (
+      <div className="mt-3 flex flex-wrap gap-2">
+        {words.map(({ w, i }) => {
+          const wc = checks.find((x) => x.word_index === i);
+          const ok = wc?.ok ?? true;
+          const hasCheck = !!wc;
+          return (
+            <div
+              key={`nbw-${i}-${w}`}
+              className={`max-w-[160px] rounded-lg border-4 p-2 text-center ${
+                !hasCheck ? "border-white/30 bg-black/10"
+                : ok ? "border-green-500 bg-green-900/30"
+                : "border-red-500 bg-red-900/30"
+              }`}
+            >
+              <div className="text-lg font-black">{w}</div>
+              {wc?.word_seen?.trim() ? (
+                <p className="mt-0.5 text-xs text-white/80">Seen: {wc.word_seen}</p>
+              ) : null}
+              {wc && !wc.ok ? (
+                <p className="mt-1 text-left text-xs leading-snug text-white/95">{wc.hint_en}</p>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
 
-  async function pronounceWord(word: string) {
-    setBusy("Speaking…");
+  async function playCurrentSentenceAloud() {
+    if (!extracted) return;
+    const sents = sentencesFromExtracted(extracted);
+    if (!sents.length) return;
+    const s = sents[highlightSentence] ?? sents[0]!;
+    setBusy("Reading…");
     try {
-      await playTts(word, "de");
+      await playTts(s, "de", readAloudSpeed);
     } finally {
       setBusy(null);
     }
   }
 
-  async function readAloudNext() {
-    if (!extracted) return;
-    const sents = sentencesFromExtracted(extracted);
-    if (!sents.length) return;
-    const s = sents[highlightSentence % sents.length]!;
-    setBusy("Reading…");
-    try {
-      await playTts(s, "de");
-      setHighlightSentence((h) => (h + 1) % sents.length);
-    } finally {
-      setBusy(null);
-    }
+  const readSents = extracted ? sentencesFromExtracted(extracted) : [];
+  const readTrans = extracted ? sentenceEnglishLines(extracted) : [];
+
+  function sentenceNavPrev() {
+    setHighlightSentence((h) => Math.max(0, h - 1));
+  }
+
+  function sentenceNavNext() {
+    setHighlightSentence((h) => Math.min(readSents.length - 1, h + 1));
   }
 
   function markWordFeedback(idx: number, fb: WordFeedback) {
@@ -380,13 +463,13 @@ export function QuestClient({
     if (ok) {
       setRewardTick((x) => x + 1);
       try {
-        await playTts("Super!", "de");
+        await playTts("Super!", "de", 0.95);
       } catch {
         /* ignore */
       }
     } else {
       try {
-        await playTts(spellTarget.word, "de");
+        await playTts(spellTarget.word, "de", 0.82);
       } catch {
         /* ignore */
       }
@@ -604,13 +687,66 @@ export function QuestClient({
         </div>
       ) : null}
 
-      {/* a */}
-      {step === "a_upload" && (
+      {/* a — photo then confirm/edit text */}
+      {step === "a_upload" && extracted && pendingSheetReview ? (
+        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+          <h2 className="text-xl font-black">Is this the right homework text?</h2>
+          <p className="mt-2 text-sm text-white/90">
+            Fix spelling or typing if the scan missed something. This is the text Elio will copy
+            and practice.
+          </p>
+          <textarea
+            value={draftFullText}
+            onChange={(e) => setDraftFullText(e.target.value)}
+            rows={8}
+            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 font-mono text-base text-black"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+          {extracted.main_task_summary_en ? (
+            <p className="mt-3 rounded-lg bg-black/20 p-3 text-sm">
+              <span className="font-bold text-[#f4d03f]">What to do: </span>
+              {extracted.main_task_summary_en}
+            </p>
+          ) : null}
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              className="flex-1 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-lg font-black text-[#2d1f18]"
+              onClick={confirmSheetToNotebook}
+            >
+              Looks good — next: notebook
+            </button>
+            <button
+              type="button"
+              className="flex-1 rounded-xl border-2 border-white/40 py-4 font-bold"
+              onClick={() => setPendingSheetReview(false)}
+            >
+              Back to photo
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {step === "a_upload" && (!extracted || !pendingSheetReview) ? (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Homework sheet photo</h2>
           <p className="mt-2 text-sm text-white/90">
             Ask a grown-up to take a clear photo of the whole sheet.
           </p>
+          {extracted && !pendingSheetReview ? (
+            <button
+              type="button"
+              className="mt-3 w-full rounded-lg border-2 border-amber-300 bg-amber-900/40 py-3 text-sm font-bold"
+              onClick={() => {
+                setDraftFullText(extracted.full_german_text);
+                setPendingSheetReview(true);
+              }}
+            >
+              Edit scanned text (if something was wrong)
+            </button>
+          ) : null}
           <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
             <input
               type="file"
@@ -641,14 +777,17 @@ export function QuestClient({
             {busy || "Scan sheet"}
           </button>
         </section>
-      )}
+      ) : null}
 
       {/* b */}
       {step === "b_notebook" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Notebook copy</h2>
-          <p className="mt-2 text-sm">
-            Copy the German text. Take 1–2 photos. Grok checks handwriting.
+          <p className="mt-2 text-sm leading-relaxed">
+            Copy the German text into your notebook. Take 1–2 photos and tap <strong>Check notebook</strong>.
+            Every check shows your photo and what was read vs what it should be, plus green/red per word.
+            Photos stay on this device for about <strong>two days</strong>, then they are removed automatically
+            (we do not keep a long history of pictures).
           </p>
           <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
             <input
@@ -688,6 +827,89 @@ export function QuestClient({
               Skip for now
             </button>
           </div>
+
+          {notebookAttempts.length > 0 ? (
+            <div ref={notebookFeedbackRef} className="mt-6 scroll-mt-24 space-y-6 border-t-2 border-white/20 pt-4">
+              <div>
+                <p className="font-bold text-[#f4d03f]">Your notebook checks</p>
+                <p className="mt-1 text-xs text-white/75">
+                  Each upload gets its own feedback. You can take another photo and check again anytime.
+                </p>
+              </div>
+              {notebookAttempts.map((attempt, idx) => (
+                <div
+                  key={attempt.id}
+                  className="rounded-xl border-2 border-white/25 bg-black/25 p-3 shadow-inner"
+                >
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="text-sm font-bold text-white/90">
+                      {relativeNotebookTime(attempt.createdAt)}
+                    </span>
+                    {idx === 0 ? (
+                      <span className="rounded bg-[#f4d03f] px-2 py-0.5 text-xs font-black text-[#2d1f18]">
+                        Latest
+                      </span>
+                    ) : null}
+                  </div>
+                  {attempt.imageDataUrls.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {attempt.imageDataUrls.map((url, i) => (
+                        <img
+                          key={i}
+                          src={url}
+                          alt=""
+                          className="max-h-48 max-w-full rounded-lg border-2 border-white/40 object-contain shadow-md"
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-xs text-white/60">
+                      (Photo preview not saved — feedback still applies.)
+                    </p>
+                  )}
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg bg-black/35 p-3 ring-1 ring-white/15">
+                      <p className="text-xs font-bold uppercase tracking-wide text-white/70">
+                        From your photo
+                      </p>
+                      <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
+                        {attempt.handwriting.recognized_text?.trim() || "—"}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-black/35 p-3 ring-1 ring-[#7bed9f]/40">
+                      <p className="text-xs font-bold uppercase tracking-wide text-[#7bed9f]">
+                        Should match
+                      </p>
+                      <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
+                        {extracted.full_german_text}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-sm text-white/90">{attempt.handwriting.summary}</p>
+                  {notebookWordTiles(attempt.handwriting)}
+                </div>
+              ))}
+            </div>
+          ) : handwriting ? (
+            <div className="mt-6 border-t-2 border-white/20 pt-4">
+              <p className="font-bold text-[#f4d03f]">Last saved check</p>
+              <p className="mt-1 text-xs text-white/75">
+                Add a new photo to see it here with your picture. Older sessions may not have stored images.
+              </p>
+              <p className="mt-3 text-sm text-white/90">{handwriting.summary}</p>
+              {notebookWordTiles(handwriting)}
+            </div>
+          ) : null}
+
+          {(notebookAttempts.length > 0 || handwriting) ? (
+            <button
+              type="button"
+              className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
+              onClick={() => goToStep("c_guide")}
+            >
+              Continue to next step
+            </button>
+          ) : null}
         </section>
       )}
 
@@ -695,6 +917,11 @@ export function QuestClient({
       {step === "c_guide" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">What to do</h2>
+          {extracted.main_task_summary_en ? (
+            <p className="mt-3 rounded-lg bg-black/25 p-3 text-base font-semibold leading-relaxed">
+              {extracted.main_task_summary_en}
+            </p>
+          ) : null}
           <ul className="mt-3 list-decimal pl-6 text-sm">
             {extracted.instructions.map((x, i) => (
               <li key={i} className="mb-1">
@@ -719,52 +946,88 @@ export function QuestClient({
       {step === "d_interactive" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Tap words</h2>
-          <p className="mt-2 text-sm">Hover: English tip. Click: hear German.</p>
-          <p className="mt-4 text-2xl leading-relaxed">
-            {words.map(({ w, i }) => (
-              <span key={`${i}-${w}`} className="inline-block">
-                <button
-                  type="button"
-                  title={meaningMap.get(w.toLowerCase()) || "Look it up with your coach"}
-                  className="mx-0.5 rounded px-1 hover:bg-white/20"
-                  onClick={() => void pronounceWord(w)}
-                >
-                  {w}
-                </button>{" "}
-              </span>
-            ))}
+          <p className="mt-2 text-sm text-white/90">
+            On a phone: <span className="font-bold text-[#f4d03f]">tap</span> a word to hear it and
+            see the English under the box.
           </p>
+          <GermanWordBlock extracted={extracted} showSentenceEnglish={false} className="mt-4" />
           <button
             type="button"
             className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
             onClick={() => goToStep("e_read_aloud")}
           >
-            Next: read aloud
+            Next: listen
           </button>
         </section>
       )}
 
       {/* e */}
-      {step === "e_read_aloud" && extracted && (
+      {step === "e_read_aloud" && extracted && readSents.length > 0 && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">Listen (one sentence at a time)</h2>
+          <h2 className="text-xl font-black">Listen</h2>
           <p className="mt-2 text-sm text-white/90">
-            Highlight moves after each sentence (Grok TTS).
+            Read the whole text below. Pick a sentence, then play — slower is easier.
           </p>
-          <p className="mt-4 rounded-lg bg-black/20 p-3 text-xl font-semibold leading-relaxed">
-            {sentencesFromExtracted(extracted)[highlightSentence % sentencesFromExtracted(extracted).length]}
+          <div className="mt-3 max-h-48 overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-sm leading-relaxed">
+            {readSents.map((line, i) => (
+              <p
+                key={i}
+                className={`mb-2 rounded px-2 py-1 ${
+                  i === highlightSentence ? "bg-[#f4d03f]/25 ring-2 ring-[#f4d03f]" : ""
+                }`}
+              >
+                <span className="text-white/50">{i + 1}. </span>
+                {line}
+              </p>
+            ))}
+          </div>
+          <p className="mt-4 rounded-lg bg-black/30 p-3 text-base leading-relaxed">
+            <span className="font-bold text-[#f4d03f]">English (this sentence): </span>
+            {readTrans[highlightSentence]?.trim() || "— (add translations when scanning next time)"}
           </p>
+          <p className="mt-3 text-sm font-bold text-white/80">Speaking speed</p>
+          <input
+            type="range"
+            min={0.55}
+            max={1}
+            step={0.05}
+            value={readAloudSpeed}
+            onChange={(e) => setReadAloudSpeed(Number(e.target.value))}
+            className="mt-1 w-full"
+          />
+          <p className="text-xs text-white/60">Slower ← {readAloudSpeed.toFixed(2)} → Faster</p>
+          <p className="mt-4 rounded-lg bg-black/20 p-4 text-xl font-semibold leading-relaxed">
+            {readSents[highlightSentence]}
+          </p>
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <button
+              type="button"
+              className="rounded-xl border-2 border-white/30 py-3 font-bold"
+              onClick={sentenceNavPrev}
+              disabled={highlightSentence <= 0}
+            >
+              ← Previous
+            </button>
+            <button
+              type="button"
+              className="rounded-xl border-2 border-white/30 py-3 font-bold"
+              onClick={sentenceNavNext}
+              disabled={highlightSentence >= readSents.length - 1}
+            >
+              Next →
+            </button>
+            <button
+              type="button"
+              disabled={!!busy}
+              onClick={() => void playCurrentSentenceAloud()}
+              className="col-span-2 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-lg font-black text-[#2d1f18] disabled:opacity-50 sm:col-span-2"
+            >
+              {busy || "🔊 Play this sentence"}
+            </button>
+          </div>
           <button
             type="button"
-            disabled={!!busy}
-            onClick={() => void readAloudNext()}
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:opacity-50"
-          >
-            {busy || "Play next sentence"}
-          </button>
-          <button
-            type="button"
-            className="mt-3 w-full rounded-xl border-2 border-white/30 py-3 font-bold"
+            className="mt-4 w-full rounded-xl border-2 border-white/30 py-3 font-bold"
             onClick={() => goToStep("f_user_read")}
           >
             Next: you read
@@ -777,51 +1040,77 @@ export function QuestClient({
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">You read</h2>
           <p className="mt-2 text-sm">
-            Tap the word you are on while you read. For full Grok listening, connect voice
-            (proxy).
+            Move sentence by sentence. Tap words to hear them again if a sound is tricky.
           </p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {words.map(({ w, i }) => (
+          {sentencesFromExtracted(extracted).length > 1 ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
-                key={`read-${i}`}
                 type="button"
-                onClick={() => setReadIdx(i)}
-                className={`rounded-lg border-2 px-2 py-1 text-lg font-bold ${
-                  readIdx === i ? "border-[#f4d03f] bg-[#f4d03f] text-[#2d1f18]" : "border-white/20"
-                }`}
+                className="rounded-lg border-2 border-white/30 px-4 py-2 font-bold"
+                onClick={() => setFSentenceIdx((i) => Math.max(0, i - 1))}
               >
-                {w}
+                ← Sentence
               </button>
-            ))}
-          </div>
+              <span className="text-sm">
+                {fSentenceIdx + 1} / {sentencesFromExtracted(extracted).length}
+              </span>
+              <button
+                type="button"
+                className="rounded-lg border-2 border-white/30 px-4 py-2 font-bold"
+                onClick={() =>
+                  setFSentenceIdx((i) =>
+                    Math.min(sentencesFromExtracted(extracted).length - 1, i + 1),
+                  )
+                }
+              >
+                Sentence →
+              </button>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#2d6a4f] py-3 text-lg font-black text-white"
+            onClick={() => {
+              const s = sentencesFromExtracted(extracted)[fSentenceIdx];
+              if (s) void playTts(s, "de", 0.75);
+            }}
+          >
+            🔊 Listen to this sentence (slow)
+          </button>
+          <GermanWordBlock
+            extracted={extracted}
+            sentenceIndex={fSentenceIdx}
+            showSentenceEnglish
+            className="mt-4"
+          />
           <div className="mt-4 flex flex-wrap gap-2">
             {rtState === "off" ? (
               <button
                 type="button"
-                className="rounded-lg bg-white/10 px-3 py-2 font-bold"
+                className="rounded-lg bg-white/10 px-3 py-2 text-sm font-bold"
                 onClick={connectRealtime}
               >
-                Connect Grok voice (Realtime)
+                Optional: Grok voice (Realtime)
               </button>
             ) : (
               <button
                 type="button"
-                className="rounded-lg bg-white/10 px-3 py-2 font-bold"
+                className="rounded-lg bg-white/10 px-3 py-2 text-sm font-bold"
                 onClick={disconnectRealtime}
               >
                 Disconnect ({rtState})
               </button>
             )}
           </div>
-          <p className="mt-2 text-xs text-white/70">
-            Events: {voiceEvents.slice(-6).join(", ") || "—"}
+          <p className="mt-2 text-xs text-white/60">
+            Voice debug: {voiceEvents.slice(-4).join(", ") || "—"}
           </p>
           <button
             type="button"
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
             onClick={() => goToStep("g_repeat_spelling")}
           >
-            Next: repeat & spell
+            Next: practice & spelling
           </button>
         </section>
       )}
@@ -830,8 +1119,29 @@ export function QuestClient({
       {step === "g_repeat_spelling" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Practice & spelling</h2>
-          <p className="mt-2 text-sm">
-            Tap a color for each word. When ready, start the spelling game.
+          <div className="mt-3 rounded-lg border-2 border-white/20 bg-black/20 p-3 text-sm leading-relaxed">
+            <p className="font-bold text-[#f4d03f]">How you felt reading each word (honest is OK!)</p>
+            <ul className="mt-2 list-disc pl-5 space-y-1">
+              <li>
+                <span className="inline-block h-3 w-3 rounded bg-green-500 align-middle" />{" "}
+                <strong>Green</strong> — sounded perfect
+              </li>
+              <li>
+                <span className="inline-block h-3 w-3 rounded bg-blue-600 align-middle" />{" "}
+                <strong>Blue</strong> — almost right (small slip)
+              </li>
+              <li>
+                <span className="inline-block h-3 w-3 rounded bg-red-600 align-middle" />{" "}
+                <strong>Red</strong> — needs more practice
+              </li>
+            </ul>
+            <p className="mt-2 text-xs text-white/75">
+              Then play the spelling game: hear the word, type it in German (capital letters for
+              nouns).
+            </p>
+          </div>
+          <p className="mt-4 text-sm">
+            Tap a color under each word. When ready, start the spelling game.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             {words.map(({ w, i }) => {
@@ -848,7 +1158,7 @@ export function QuestClient({
                       } ${c === "green" ? "bg-green-500" : c === "blue" ? "bg-blue-600" : "bg-red-600"}`}
                       onClick={() => markWordFeedback(i, c)}
                     >
-                      {c}
+                      {c === "green" ? "OK" : c === "blue" ? "Almost" : "Hard"}
                     </button>
                   ))}
                 </div>
@@ -873,9 +1183,9 @@ export function QuestClient({
                   <button
                     type="button"
                     className="mt-3 w-full rounded-lg bg-white/10 py-3 font-bold"
-                    onClick={() => void playTts(spellTarget.word, "de")}
+                    onClick={() => void playTts(spellTarget.word, "de", 0.78)}
                   >
-                    Hear again
+                    Hear again (slow)
                   </button>
                   <input
                     value={spellInput}
