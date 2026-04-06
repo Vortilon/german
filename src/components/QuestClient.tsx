@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import type { AppPersistence } from "@/lib/get-app-session";
 import type {
   ExtractedHomework,
   HandwritingResult,
@@ -78,9 +79,20 @@ const STEP_ORDER: HomeworkProgressStep[] = [
   "done",
 ];
 
-export function QuestClient({ user }: { user: User }) {
+function localStorageKey(userId: string, week: string) {
+  return `elio_german_homework_${userId}_${week}`;
+}
+
+export function QuestClient({
+  user,
+  persistence,
+}: {
+  user: User;
+  persistence: AppPersistence;
+}) {
   const weekStart = useMemo(() => getWeekStartIso(), []);
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+  const useLocal = persistence === "local";
 
   const [loaded, setLoaded] = useState(false);
   const [extracted, setExtracted] = useState<ExtractedHomework | null>(null);
@@ -127,22 +139,72 @@ export function QuestClient({ user }: { user: User }) {
       handwriting?: HandwritingResult | null;
       parent_report?: ParentReport | null;
     }) => {
+      const ex = next.extracted ?? extracted;
+      const pr = next.progress ?? progress;
+      const hw = next.handwriting ?? handwriting;
+      const rep = next.parent_report ?? parentReport;
+      if (useLocal && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(
+            localStorageKey(user.id, weekStart),
+            JSON.stringify({
+              extracted: ex,
+              progress: pr,
+              handwriting: hw,
+              parent_report: rep,
+            }),
+          );
+        } catch {
+          /* quota */
+        }
+        return;
+      }
       if (!supabase) return;
       await upsertHomeworkWeek(supabase, {
         user_id: user.id,
         week_start: weekStart,
-        topic: next.extracted?.title ?? extracted?.title ?? null,
-        extracted: next.extracted ?? extracted,
-        progress: next.progress ?? progress,
-        handwriting: next.handwriting ?? handwriting,
-        parent_report: next.parent_report ?? parentReport,
+        topic: ex?.title ?? null,
+        extracted: ex,
+        progress: pr,
+        handwriting: hw,
+        parent_report: rep,
       });
     },
-    [supabase, user.id, weekStart, extracted, progress, handwriting, parentReport],
+    [
+      useLocal,
+      supabase,
+      user.id,
+      weekStart,
+      extracted,
+      progress,
+      handwriting,
+      parentReport,
+    ],
   );
 
   useEffect(() => {
     (async () => {
+      if (useLocal) {
+        try {
+          const raw = localStorage.getItem(localStorageKey(user.id, weekStart));
+          if (raw) {
+            const bundle = JSON.parse(raw) as {
+              extracted?: ExtractedHomework;
+              progress?: HomeworkProgress;
+              handwriting?: HandwritingResult | null;
+              parent_report?: ParentReport | null;
+            };
+            if (bundle.extracted) setExtracted(bundle.extracted);
+            if (bundle.progress) setProgress(bundle.progress);
+            if (bundle.handwriting) setHandwriting(bundle.handwriting);
+            if (bundle.parent_report) setParentReport(bundle.parent_report);
+          }
+        } catch {
+          /* ignore */
+        }
+        setLoaded(true);
+        return;
+      }
       if (!supabase) {
         setLoaded(true);
         return;
@@ -159,7 +221,7 @@ export function QuestClient({ user }: { user: User }) {
         setLoaded(true);
       }
     })();
-  }, [supabase, user.id, weekStart]);
+  }, [useLocal, supabase, user.id, weekStart]);
 
   function setStep(step: HomeworkProgressStep) {
     setProgress((p) => {
@@ -412,7 +474,7 @@ export function QuestClient({ user }: { user: User }) {
     setRtState("off");
   }
 
-  if (!supabase) {
+  if (!useLocal && !supabase) {
     return (
       <div className="p-6 text-center text-xl font-bold text-white">
         Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.
@@ -453,7 +515,15 @@ export function QuestClient({ user }: { user: User }) {
             <button
               type="button"
               className="rounded-lg border-2 border-[#2d1f18] bg-white/10 px-3 py-2 text-sm font-bold"
-              onClick={() => void supabase.auth.signOut().then(() => window.location.assign("/login"))}
+              onClick={() => {
+                if (useLocal) {
+                  void fetch("/api/auth/elio", { method: "DELETE" }).then(() =>
+                    window.location.assign("/login"),
+                  );
+                } else if (supabase) {
+                  void supabase.auth.signOut().then(() => window.location.assign("/login"));
+                }
+              }}
             >
               Log out
             </button>

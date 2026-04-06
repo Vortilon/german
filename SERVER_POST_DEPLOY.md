@@ -2,30 +2,27 @@
 
 The app is served at **https://german.noteify.us** from `/opt/prankmaster-german/` (Docker + Nginx).
 
-## Required: Supabase (login + homework DB)
+## Login without Supabase (default for quick testing)
 
-Until these are set, the site shows a **config** error at login.
+Set **`ELIO_AUTH_SECRET`** (min 16 characters; e.g. `openssl rand -hex 32`) in `/opt/prankmaster-german/.env`, then:
 
-1. Create a Supabase project (or use an existing one).
+```bash
+cd /opt/prankmaster-german
+docker compose up -d --build
+```
+
+Use **`elio` / `elio`** on the login screen. Homework is stored in **this browser** (localStorage) until you add Supabase.
+
+## Optional: Supabase (cloud sync + same login across devices)
+
+1. Create a Supabase project.
 2. Run `supabase/migrations/001_init.sql` in the Supabase SQL editor.
-3. In Supabase Auth, create user **email:** `elio@german.app` **password:** `elio`.
-4. On the server, edit `/opt/prankmaster-german/.env`:
-
-   - `NEXT_PUBLIC_SUPABASE_URL=...`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY=...`
-
-5. Rebuild so `NEXT_PUBLIC_*` is embedded in the client bundle:
-
-   ```bash
-   cd /opt/prankmaster-german
-   docker compose up -d --build
-   ```
-
-6. Reload is automatic; test **https://german.noteify.us/login**.
+3. Create user **email:** `elio@german.app` **password:** `elio`.
+4. Add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` to `.env`, then `docker compose up -d --build`.
 
 ## Realtime voice WebSocket
 
-`NEXT_PUBLIC_REALTIME_WS_URL=wss://german.noteify.us/realtime` should already be set. The `realtime` container proxies to xAI (see `server/realtime-proxy.mjs`).
+`NEXT_PUBLIC_REALTIME_WS_URL=wss://german.noteify.us/realtime` should be set. The `realtime` container proxies to xAI (`server/realtime-proxy.mjs`).
 
 ## Do not disturb other apps
 

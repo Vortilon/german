@@ -21,7 +21,7 @@ export function LoginForm() {
 
   const hint = useMemo(() => {
     if (err === "config")
-      return "Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to your environment.";
+      return "Server needs Supabase keys or ELIO_AUTH_SECRET — ask your admin.";
     return null;
   }, [err]);
 
@@ -31,17 +31,26 @@ export function LoginForm() {
     setMsg(null);
     try {
       const supabase = createSupabaseBrowserClient();
-      if (!supabase) {
-        setMsg("Supabase is not configured.");
-        setBusy(false);
-        return;
+      if (supabase) {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: emailFromUsername(username),
+          password,
+        });
+        if (!error) {
+          router.replace(next);
+          router.refresh();
+          return;
+        }
       }
-      const { error } = await supabase.auth.signInWithPassword({
-        email: emailFromUsername(username),
-        password,
+
+      const r = await fetch("/api/auth/elio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
       });
-      if (error) {
-        setMsg(error.message);
+      const data = (await r.json()) as { error?: string };
+      if (!r.ok) {
+        setMsg(data.error ?? "Login failed");
         setBusy(false);
         return;
       }

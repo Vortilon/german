@@ -1,13 +1,9 @@
 import { redirect } from "next/navigation";
 import { QuestClient } from "@/components/QuestClient";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getAppSession } from "@/lib/get-app-session";
 
 export default async function AppHomePage() {
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) redirect("/login?error=config");
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-  return <QuestClient user={user} />;
+  const session = await getAppSession();
+  if (!session) redirect("/login");
+  return <QuestClient user={session.user} persistence={session.persistence} />;
 }
