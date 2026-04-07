@@ -265,7 +265,7 @@ export function QuestClient({
     if (!d || d.complete) return;
     const expected = d.words[d.currentIdx]!;
     const written = d.typed.trim();
-    const ok = normalizeSpokenWord(written) === normalizeSpokenWord(expected);
+    const ok = normalizeDictationWord(written) === normalizeDictationWord(expected);
     const totalAttempts = d.totalAttempts + 1;
 
     if (!ok) {
@@ -352,6 +352,11 @@ export function QuestClient({
     queueMicrotask(() => {
       void playTts(first, "de", 0.78);
     });
+  }
+
+  /** Typed dictation: same punctuation rules as tokenizeWords; case must match (German nouns). */
+  function normalizeDictationWord(w: string) {
+    return w.replace(/[.,!?;:«»"„"()]/g, "").replace(/\s+/g, "").trim();
   }
 
   function normalizeSpokenWord(w: string) {
