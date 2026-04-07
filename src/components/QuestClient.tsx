@@ -154,25 +154,21 @@ export function QuestClient({
 
   const [readAloudSpeed, setReadAloudSpeed] = useState(0.78);
   const [fSentenceIdx, setFSentenceIdx] = useState(0);
-  const [writeState, setWriteState] = useState<{
-    sentenceIdx: number;
-    wordIdx: number;
+
+  /** Full-passage dictation: random prompts until every word is mastered once. */
+  const [dictation, setDictation] = useState<{
+    words: string[];
+    mastered: boolean[];
+    currentIdx: number;
     typed: string;
-    wordOk: boolean[];
-    sentenceScores: number[];
-    showGif?: { kind: "success" | "fail"; url: string } | null;
-    finished?: boolean;
-    finalVideoUrl?: string | null;
-  }>({
-    sentenceIdx: 0,
-    wordIdx: 0,
-    typed: "",
-    wordOk: [],
-    sentenceScores: [],
-    showGif: null,
-    finished: false,
-    finalVideoUrl: null,
-  });
+    feedback:
+      | { kind: "none" }
+      | { kind: "result"; ok: boolean; expected: string; written: string };
+    totalAttempts: number;
+    complete: boolean;
+  } | null>(null);
+
+  const DICTATION_VIDEO_URL = "https://www.youtube.com/embed/dQw4w9WgXcQ";
 
   // --- Listening check (Web Speech API)
   const [listenState, setListenState] = useState<
@@ -197,91 +193,108 @@ export function QuestClient({
   }, [fSentenceIdx]);
 
   useEffect(() => {
-    // Keep writing game roughly aligned with selected sentence (but don't force during play).
-    setWriteState((s) => (s.finished ? s : { ...s, sentenceIdx: fSentenceIdx }));
-  }, [fSentenceIdx]);
+    if (progress.step !== "g_dictation" || !extracted) return;
+    setDictation((d) => {
+      if (d && d.words.length > 0) return d;
+      const words = tokenizeWords(extracted.full_german_text).map((x) => x.w);
+      if (words.length === 0) return null;
+      const currentIdx = Math.floor(Math.random() * words.length);
+      return {
+        words,
+        mastered: words.map(() => false),
+        currentIdx,
+        typed: "",
+        feedback: { kind: "none" },
+        totalAttempts: 0,
+        complete: false,
+      };
+    });
+  }, [progress.step, extracted]);
 
-  const successGifs = [
-    "https://media.giphy.com/media/111ebonMs90YLu/giphy.gif",
-    "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
-    "https://media.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif",
-  ];
-  const failGifs = [
-    "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
-    "https://media.giphy.com/media/l2JHRhAtnJSDNJ2py/giphy.gif",
-    "https://media.giphy.com/media/9Y5BbDSkSTiY8/giphy.gif",
-  ];
-  const finalVideoUrl = "https://www.youtube.com/embed/dQw4w9WgXcQ";
-
-  function pickRandom(arr: string[]) {
-    return arr[Math.floor(Math.random() * arr.length)]!;
+  function pickRandomUnmasteredIndex(mastered: boolean[]): number {
+    const pool: number[] = [];
+    for (let i = 0; i < mastered.length; i++) {
+      if (!mastered[i]) pool.push(i);
+    }
+    if (!pool.length) return 0;
+    return pool[Math.floor(Math.random() * pool.length)]!;
   }
 
-  function resetWritingGame() {
-    setWriteState({
-      sentenceIdx: fSentenceIdx,
-      wordIdx: 0,
-      typed: "",
-      wordOk: [],
-      sentenceScores: [],
-      showGif: null,
-      finished: false,
-      finalVideoUrl: null,
+  function dictationHint(expected: string, written: string): string {
+    const hints: string[] = [];
+    if (expected !== written && expected.toLowerCase() === written.toLowerCase()) {
+      hints.push("Check capital letters — German nouns start with a capital letter.");
+    }
+    if (expected.length !== written.length) {
+      hints.push(
+        expected.length > written.length ?
+          "Some letters may be missing."
+        : "You may have extra letters.",
+      );
+    }
+    const eU = /[äöüß]/i.test(expected);
+    const wU = /[äöüß]/i.test(written);
+    if (eU && !wU) hints.push("Check umlauts (ä, ö, ü) and ß.");
+    return hints.length ? hints.join(" ") : "Compare letter by letter with the correct word below.";
+  }
+
+  function submitDictation() {
+    setDictation((d) => {
+      if (!d || d.complete) return d;
+      const expected = d.words[d.currentIdx]!;
+      const written = d.typed.trim();
+      const ok = normalizeSpokenWord(written) === normalizeSpokenWord(expected);
+      const totalAttempts = d.totalAttempts + 1;
+      if (!ok) {
+        return {
+          ...d,
+          feedback: { kind: "result", ok: false, expected, written },
+          typed: "",
+          totalAttempts,
+        };
+      }
+      const mastered = [...d.mastered];
+      mastered[d.currentIdx] = true;
+      const done = mastered.filter(Boolean).length;
+      const total = d.words.length;
+      if (done >= total) {
+        return {
+          ...d,
+          mastered,
+          feedback: { kind: "result", ok: true, expected, written },
+          typed: "",
+          totalAttempts,
+          complete: true,
+        };
+      }
+      const nextIdx = pickRandomUnmasteredIndex(mastered);
+      return {
+        ...d,
+        mastered,
+        currentIdx: nextIdx,
+        typed: "",
+        feedback: { kind: "result", ok: true, expected, written },
+        totalAttempts,
+      };
     });
   }
 
-  function currentWritingSentence(ex: ExtractedHomework) {
-    const sents = sentencesFromExtracted(ex);
-    const idx = Math.min(Math.max(0, writeState.sentenceIdx), Math.max(0, sents.length - 1));
-    return { sents, idx, sentence: sents[idx] || "" };
-  }
-
-  function submitWrittenWord(ex: ExtractedHomework) {
-    const { sents, idx, sentence } = currentWritingSentence(ex);
-    const words = tokenizeWords(sentence).map((x) => x.w);
-    if (!words.length) return;
-    const target = words[writeState.wordIdx] || "";
-    const typed = writeState.typed.trim();
-    const ok = normalizeSpokenWord(typed) === normalizeSpokenWord(target);
-    const nextWordOk = [...writeState.wordOk, ok];
-    const nextWordIdx = writeState.wordIdx + 1;
-
-    // Next word
-    if (nextWordIdx < words.length) {
-      setWriteState((s) => ({
-        ...s,
-        wordIdx: nextWordIdx,
-        typed: "",
-        wordOk: nextWordOk,
-        showGif: null,
-      }));
+  function resetDictationSession() {
+    if (!extracted) return;
+    const words = tokenizeWords(extracted.full_german_text).map((x) => x.w);
+    if (!words.length) {
+      setDictation(null);
       return;
     }
-
-    // Sentence finished: compute score + show gif
-    const correct = nextWordOk.filter(Boolean).length;
-    const scorePct = Math.round((correct / words.length) * 100);
-    const passed = scorePct >= 80;
-    const nextSentenceScores = [...(writeState.sentenceScores || []), scorePct];
-    const showGif: { kind: "success" | "fail"; url: string } = {
-      kind: passed ? "success" : "fail",
-      url: pickRandom(passed ? successGifs : failGifs),
-    };
-
-    // Move to next sentence
-    const nextSentenceIdx = idx + 1;
-    const finishedAll = nextSentenceIdx >= sents.length;
-    setWriteState((s) => ({
-      ...s,
-      sentenceIdx: finishedAll ? idx : nextSentenceIdx,
-      wordIdx: 0,
+    setDictation({
+      words,
+      mastered: words.map(() => false),
+      currentIdx: Math.floor(Math.random() * words.length),
       typed: "",
-      wordOk: [],
-      sentenceScores: nextSentenceScores,
-      showGif,
-      finished: finishedAll,
-      finalVideoUrl: finishedAll ? finalVideoUrl : null,
-    }));
+      feedback: { kind: "none" },
+      totalAttempts: 0,
+      complete: false,
+    });
   }
 
   function normalizeSpokenWord(w: string) {
@@ -1449,86 +1462,142 @@ export function QuestClient({
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Dictation (type what you hear)</h2>
           <p className="mt-2 text-sm text-white/90">
-            The computer says a word. Elio types it. The word is <strong>not shown</strong> until he submits.
+            The computer picks a <strong>random word</strong> from your homework. Type what you hear. If it’s
+            wrong, you’ll see <strong>what you wrote</strong> vs <strong>the right spelling</strong> — try again
+            until it’s right. Progress hits <strong>100%</strong> when every word has been spelled correctly
+            once (you may see words again until they’re all done).
           </p>
 
-          <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/20 p-4">
-            {(() => {
-              const { sents, idx, sentence } = currentWritingSentence(extracted);
-              const words = tokenizeWords(sentence).map((x) => x.w);
-              const target = words[writeState.wordIdx] || "";
-              const totalSentences = sents.length || 1;
-              const wordNumber = writeState.wordIdx + 1;
-              const totalWords = words.length || 1;
-              return (
-                <>
-                  <p className="text-xs text-white/80">
-                    Sentence {idx + 1} / {totalSentences} • Word {wordNumber} / {totalWords}
-                  </p>
-
-                  <button
-                    type="button"
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
-                    onClick={() => void playTts(target, "de", 0.78)}
-                    disabled={!target}
-                  >
-                    🔊 Hear the word (slow)
-                  </button>
-
-                  <input
-                    value={writeState.typed}
-                    onChange={(e) => setWriteState((s) => ({ ...s, typed: e.target.value }))}
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                  />
-
-                  <button
-                    type="button"
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-white/10 py-3 font-black"
-                    onClick={() => submitWrittenWord(extracted)}
-                    disabled={!target}
-                  >
-                    Submit
-                  </button>
-
-                  {writeState.showGif ? (
-                    <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/25 p-3">
-                      <p className="text-sm font-bold">
-                        {writeState.showGif.kind === "success"
-                          ? "Nice! Sentence passed (≥ 80%)"
-                          : "Not yet (under 80%) — try again"}
-                      </p>
-                      <img
-                        src={writeState.showGif.url}
-                        alt=""
-                        className="mt-3 max-h-56 w-full rounded-lg object-contain"
-                      />
-                    </div>
-                  ) : null}
-
-                  {writeState.finished && writeState.finalVideoUrl ? (
-                    <div className="mt-4 rounded-xl border-4 border-[#2d1f18] bg-black/25 p-3">
-                      <p className="text-sm font-black text-[#f4d03f]">You finished the whole text!</p>
-                      <div className="mt-3 aspect-video w-full overflow-hidden rounded-lg">
-                        <iframe
-                          className="h-full w-full"
-                          src={writeState.finalVideoUrl}
-                          title="Reward video"
-                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                          allowFullScreen
+          {!dictation || dictation.words.length === 0 ? (
+            <p className="mt-4 text-sm text-amber-200">Add German text in the first step — no words to dictate.</p>
+          ) : (
+            <div className="mt-4 space-y-4">
+              {(() => {
+                const d = dictation;
+                const target = d.words[d.currentIdx] || "";
+                const masteredCount = d.mastered.filter(Boolean).length;
+                const totalW = d.words.length;
+                const pct = totalW ? Math.round((masteredCount / totalW) * 100) : 0;
+                return (
+                  <>
+                    <div className="rounded-xl border-2 border-white/25 bg-black/20 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-bold">
+                        <span>
+                          Progress: {masteredCount} / {totalW} words ({pct}%)
+                        </span>
+                        <span className="text-white/70">Attempts: {d.totalAttempts}</span>
+                      </div>
+                      <div className="mt-2 h-3 w-full overflow-hidden rounded-full bg-black/30">
+                        <div
+                          className="h-full rounded-full bg-[#f4d03f] transition-[width] duration-300"
+                          style={{ width: `${pct}%` }}
                         />
                       </div>
                     </div>
-                  ) : null}
-                </>
-              );
-            })()}
-          </div>
+
+                    {d.complete ? (
+                      <div className="rounded-xl border-4 border-[#f4d03f] bg-[#1a472a] p-4 text-center">
+                        <p className="text-xl font-black text-[#f4d03f]">100% — all words correct!</p>
+                        <p className="mt-2 text-sm text-white/90">Great job. Continue when you’re ready.</p>
+                        <div className="mt-4 aspect-video w-full overflow-hidden rounded-lg">
+                          <iframe
+                            className="h-full w-full"
+                            src={DICTATION_VIDEO_URL}
+                            title="Reward"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowFullScreen
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
+                          onClick={() => {
+                            void playTts(target, "de", 0.78);
+                            setDictation((prev) =>
+                              prev ? { ...prev, feedback: { kind: "none" } } : prev,
+                            );
+                          }}
+                          disabled={!target}
+                        >
+                          🔊 Hear the word (slow)
+                        </button>
+
+                        <input
+                          value={d.typed}
+                          onChange={(e) =>
+                            setDictation((prev) => (prev ? { ...prev, typed: e.target.value } : prev))
+                          }
+                          placeholder="Type the word…"
+                          className="w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
+                          autoCapitalize="off"
+                          autoCorrect="off"
+                          disabled={d.complete}
+                        />
+
+                        <button
+                          type="button"
+                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-white/10 py-3 font-black"
+                          onClick={() => submitDictation()}
+                          disabled={!target || d.complete}
+                        >
+                          Check
+                        </button>
+
+                        {d.feedback.kind === "result" ? (
+                          <div
+                            className={`rounded-xl border-2 p-4 text-left ${
+                              d.feedback.ok ? "border-green-400 bg-green-900/35" : "border-red-400 bg-red-900/30"
+                            }`}
+                          >
+                            <p className="font-black text-lg">
+                              {d.feedback.ok ? "Correct!" : "Not quite — try again"}
+                            </p>
+                            <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                              <div className="rounded-lg bg-black/25 p-2">
+                                <p className="text-xs font-bold uppercase text-white/60">You wrote</p>
+                                <p className="text-lg font-bold text-white">
+                                  {d.feedback.written ? `"${d.feedback.written}"` : "(empty)"}
+                                </p>
+                              </div>
+                              <div className="rounded-lg bg-black/25 p-2">
+                                <p className="text-xs font-bold uppercase text-[#f4d03f]">Should be</p>
+                                <p className="text-lg font-bold text-[#f4d03f]">{d.feedback.expected}</p>
+                              </div>
+                            </div>
+                            {!d.feedback.ok ? (
+                              <p className="mt-3 text-sm text-white/90">
+                                {dictationHint(d.feedback.expected, d.feedback.written)}
+                              </p>
+                            ) : !d.complete ? (
+                              <p className="mt-3 text-sm font-semibold text-white/90">
+                                Next random word — tap <strong>Hear the word</strong> again.
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </>
+                    )}
+
+                    <button
+                      type="button"
+                      className="w-full rounded-lg border-2 border-white/30 py-2 text-sm font-bold"
+                      onClick={resetDictationSession}
+                    >
+                      Start dictation over
+                    </button>
+                  </>
+                );
+              })()}
+            </div>
+          )}
 
           <button
             type="button"
-            className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
+            disabled={!dictation?.complete}
+            className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:cursor-not-allowed disabled:opacity-45"
             onClick={() => goToStep("g_repeat_spelling")}
           >
             Next: practice & spelling
