@@ -27,6 +27,7 @@ import {
 import { GermanWordBlock } from "@/components/GermanWordBlock";
 import { ListenInlineSentence } from "@/components/ListenInlineSentence";
 import { fetchWordMeaning, makeMeaningCache } from "@/lib/word-meaning-client";
+import { formatSpeechRecognitionError } from "@/lib/speech-rec-errors";
 import { playTts } from "@/lib/play-tts";
 import {
   sentenceEnglishLines,
@@ -355,7 +356,15 @@ export function QuestClient({
       }
     };
     rec.onerror = (e: any) => {
-      setListenState({ kind: "error", message: String(e?.error || "Speech error") });
+      const code = String(e?.error ?? "");
+      if (code === "aborted") {
+        setListenState({ kind: "idle" });
+        return;
+      }
+      setListenState({
+        kind: "error",
+        message: formatSpeechRecognitionError(code),
+      });
     };
     rec.onend = () => {
       setListenState((s) => (s.kind === "listening" ? { kind: "idle" } : s));
@@ -655,8 +664,16 @@ export function QuestClient({
     if (!sents.length) return;
     const s = sents[highlightSentence] ?? sents[0]!;
     setBusy("Reading…");
+    setErr(null);
     try {
       await playTts(s, "de", readAloudSpeed);
+    } catch (e) {
+      const msg =
+        e instanceof Error && /play|not allowed|user gesture/i.test(e.message) ?
+          "Tap Play again — the browser blocked sound until you interact."
+        : e instanceof Error ? e.message
+        : "Could not play audio";
+      setErr(msg);
     } finally {
       setBusy(null);
     }
@@ -1299,9 +1316,11 @@ export function QuestClient({
           </button>
 
           <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/20 p-3">
-            <p className="text-sm font-bold text-[#f4d03f]">Listening check</p>
+            <p className="text-sm font-bold text-[#f4d03f]">Listening check (microphone)</p>
             <p className="mt-1 text-xs text-white/80">
-              Tap <strong>Start</strong>, read the sentence out loud, then we mark each word as right/wrong.
+              Tap <strong>Start</strong>, read the sentence out loud, then we mark each word. The browser
+              must allow <strong>microphone</strong> for this site. If you see an error about “not
+              allowed”, open site settings and enable the mic, or use Chrome on phone/desktop.
             </p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               {listenState.kind !== "listening" ? (
