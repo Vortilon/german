@@ -57,6 +57,7 @@ Rules:
 - word_index must run 0..N-1 for every word in the expected passage (same count as splitting EXPECTED on whitespace after normalizing).
 - ok: true if spelling/case/punctuation acceptable for age; false if clearly wrong.
 - hint_en when ok is false must say HOW to write it right (e.g. "Use Ä not A", "Noun needs capital S: Schule").
+- If the child skipped a word, set word_seen to "" and ok:false and explain it's missing (and show the correct expected word).
 - Be kind; handwriting can be messy — only mark ok:false for clear errors.`;
 
 export const VOICE_AGENT_SYSTEM = `You are "Coach Grok" for Elio (7). Theme: Minecraft, Lego, Art — playful but never mean.

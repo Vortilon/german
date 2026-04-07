@@ -93,7 +93,6 @@ export function QuestClient({
   const [notebookAttempts, setNotebookAttempts] = useState<NotebookAttempt[]>([]);
   const notebookFeedbackRef = useRef<HTMLDivElement>(null);
 
-  const [hwFiles, setHwFiles] = useState<File[]>([]);
   const [nbFiles, setNbFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -110,15 +109,40 @@ export function QuestClient({
   const startedRef = useRef<number | null>(null);
   const [voiceEvents, setVoiceEvents] = useState<string[]>([]);
 
-  /** After scan: confirm or edit text before notebook. */
-  const [pendingSheetReview, setPendingSheetReview] = useState(false);
   const [draftFullText, setDraftFullText] = useState("");
-  useEffect(() => {
-    if (extracted?.full_german_text) setDraftFullText(extracted.full_german_text);
-  }, [extracted?.full_german_text]);
+  const [draftInstructions, setDraftInstructions] = useState("");
+  const [draftTitle, setDraftTitle] = useState("Homework");
 
   const [readAloudSpeed, setReadAloudSpeed] = useState(0.78);
   const [fSentenceIdx, setFSentenceIdx] = useState(0);
+  const [writeState, setWriteState] = useState<{
+    sentenceIdx: number;
+    wordIdx: number;
+    typed: string;
+    wordOk: boolean[];
+    sentenceScores: number[];
+    showGif?: { kind: "success" | "fail"; url: string } | null;
+    finished?: boolean;
+    finalVideoUrl?: string | null;
+  }>({
+    sentenceIdx: 0,
+    wordIdx: 0,
+    typed: "",
+    wordOk: [],
+    sentenceScores: [],
+    showGif: null,
+    finished: false,
+    finalVideoUrl: null,
+  });
+
+  // --- Listening check (Web Speech API)
+  const [listenState, setListenState] = useState<
+    | { kind: "idle" }
+    | { kind: "listening" }
+    | { kind: "done"; transcript: string; wordOk: boolean[]; scorePct: number }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+  const speechRecRef = useRef<any>(null);
 
   useEffect(() => {
     if (!extracted) return;
@@ -127,6 +151,188 @@ export function QuestClient({
     setHighlightSentence((h) => Math.min(h, n - 1));
     setFSentenceIdx((i) => Math.min(i, n - 1));
   }, [extracted]);
+
+  useEffect(() => {
+    // Reset listening results when sentence changes.
+    setListenState({ kind: "idle" });
+  }, [fSentenceIdx]);
+
+  useEffect(() => {
+    // Keep writing game roughly aligned with selected sentence (but don't force during play).
+    setWriteState((s) => (s.finished ? s : { ...s, sentenceIdx: fSentenceIdx }));
+  }, [fSentenceIdx]);
+
+  const successGifs = [
+    "https://media.giphy.com/media/111ebonMs90YLu/giphy.gif",
+    "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+    "https://media.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif",
+  ];
+  const failGifs = [
+    "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+    "https://media.giphy.com/media/l2JHRhAtnJSDNJ2py/giphy.gif",
+    "https://media.giphy.com/media/9Y5BbDSkSTiY8/giphy.gif",
+  ];
+  const finalVideoUrl = "https://www.youtube.com/embed/dQw4w9WgXcQ";
+
+  function pickRandom(arr: string[]) {
+    return arr[Math.floor(Math.random() * arr.length)]!;
+  }
+
+  function resetWritingGame() {
+    setWriteState({
+      sentenceIdx: fSentenceIdx,
+      wordIdx: 0,
+      typed: "",
+      wordOk: [],
+      sentenceScores: [],
+      showGif: null,
+      finished: false,
+      finalVideoUrl: null,
+    });
+  }
+
+  function currentWritingSentence(ex: ExtractedHomework) {
+    const sents = sentencesFromExtracted(ex);
+    const idx = Math.min(Math.max(0, writeState.sentenceIdx), Math.max(0, sents.length - 1));
+    return { sents, idx, sentence: sents[idx] || "" };
+  }
+
+  function submitWrittenWord(ex: ExtractedHomework) {
+    const { sents, idx, sentence } = currentWritingSentence(ex);
+    const words = tokenizeWords(sentence).map((x) => x.w);
+    if (!words.length) return;
+    const target = words[writeState.wordIdx] || "";
+    const typed = writeState.typed.trim();
+    const ok = normalizeSpokenWord(typed) === normalizeSpokenWord(target);
+    const nextWordOk = [...writeState.wordOk, ok];
+    const nextWordIdx = writeState.wordIdx + 1;
+
+    // Next word
+    if (nextWordIdx < words.length) {
+      setWriteState((s) => ({
+        ...s,
+        wordIdx: nextWordIdx,
+        typed: "",
+        wordOk: nextWordOk,
+        showGif: null,
+      }));
+      return;
+    }
+
+    // Sentence finished: compute score + show gif
+    const correct = nextWordOk.filter(Boolean).length;
+    const scorePct = Math.round((correct / words.length) * 100);
+    const passed = scorePct >= 80;
+    const nextSentenceScores = [...(writeState.sentenceScores || []), scorePct];
+    const showGif: { kind: "success" | "fail"; url: string } = {
+      kind: passed ? "success" : "fail",
+      url: pickRandom(passed ? successGifs : failGifs),
+    };
+
+    // Move to next sentence
+    const nextSentenceIdx = idx + 1;
+    const finishedAll = nextSentenceIdx >= sents.length;
+    setWriteState((s) => ({
+      ...s,
+      sentenceIdx: finishedAll ? idx : nextSentenceIdx,
+      wordIdx: 0,
+      typed: "",
+      wordOk: [],
+      sentenceScores: nextSentenceScores,
+      showGif,
+      finished: finishedAll,
+      finalVideoUrl: finishedAll ? finalVideoUrl : null,
+    }));
+  }
+
+  function normalizeSpokenWord(w: string) {
+    return w
+      .toLowerCase()
+      .replace(/[.,!?;:«»"„"()]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+  }
+
+  function scoreTranscriptAgainstSentence(transcript: string, sentence: string) {
+    const expected = tokenizeWords(sentence).map((x) => normalizeSpokenWord(x.w));
+    const spoken = tokenizeWords(transcript).map((x) => normalizeSpokenWord(x.w));
+    const n = expected.length;
+    const wordOk: boolean[] = [];
+    for (let i = 0; i < n; i++) {
+      const e = expected[i] || "";
+      const s = spoken[i] || "";
+      wordOk.push(!!e && !!s && e === s);
+    }
+    const correct = wordOk.filter(Boolean).length;
+    const scorePct = n > 0 ? Math.round((correct / n) * 100) : 0;
+    return { wordOk, scorePct };
+  }
+
+  function stopSpeechRec() {
+    try {
+      speechRecRef.current?.stop?.();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function startListeningCheck(sentence: string) {
+    setErr(null);
+    const SR =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition ||
+      (window as any).mozSpeechRecognition ||
+      (window as any).msSpeechRecognition;
+    if (!SR) {
+      setListenState({
+        kind: "error",
+        message:
+          "Listening check is not supported on this browser. Try Chrome on phone or desktop.",
+      });
+      return;
+    }
+
+    stopSpeechRec();
+    const rec = new SR();
+    speechRecRef.current = rec;
+    rec.lang = "de-DE";
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    rec.continuous = false;
+
+    let finalText = "";
+    rec.onresult = (ev: any) => {
+      let interim = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const txt = String(ev.results[i]?.[0]?.transcript || "");
+        if (ev.results[i].isFinal) finalText += txt + " ";
+        else interim += txt + " ";
+      }
+      const t = (finalText + interim).trim();
+      if (t) {
+        const { wordOk, scorePct } = scoreTranscriptAgainstSentence(t, sentence);
+        setListenState({ kind: "done", transcript: t, wordOk, scorePct });
+      } else {
+        setListenState({ kind: "listening" });
+      }
+    };
+    rec.onerror = (e: any) => {
+      setListenState({ kind: "error", message: String(e?.error || "Speech error") });
+    };
+    rec.onend = () => {
+      setListenState((s) => (s.kind === "listening" ? { kind: "idle" } : s));
+    };
+
+    setListenState({ kind: "listening" });
+    try {
+      rec.start();
+    } catch (e) {
+      setListenState({
+        kind: "error",
+        message: e instanceof Error ? e.message : "Could not start microphone",
+      });
+    }
+  }
 
   useEffect(() => {
     startedRef.current = Date.now();
@@ -269,42 +475,35 @@ export function QuestClient({
 
   const furthestUnlocked = inferFurthestIndex(progress.step, progress.furthest_index);
 
-  function confirmSheetToNotebook() {
-    if (!extracted) return;
+  function saveManualHomeworkAndContinue() {
     const full = draftFullText.trim();
-    const lines = full.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!full) {
+      setErr("Please type the German homework text first.");
+      return;
+    }
+    const lines = full
+      .split(/\n+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const instructions = draftInstructions
+      .split(/\n+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
     const next: ExtractedHomework = {
-      ...extracted,
-      full_german_text: full || extracted.full_german_text,
-      lines: lines.length > 0 ? lines : [full || extracted.full_german_text],
+      title: draftTitle.trim() || "Homework",
+      full_german_text: full,
+      lines: lines.length > 0 ? lines : [full],
+      sentence_translations_en: [],
+      instructions: instructions.length > 0 ? instructions : ["Copy the text into your notebook."],
+      main_task_summary_en: "Copy the text neatly, then practice reading it aloud.",
+      special_words: [],
     };
+
     setExtracted(next);
     void persist({ extracted: next });
-    setPendingSheetReview(false);
-    goToStep("b_notebook");
-  }
-
-  async function runVisionHomework() {
     setErr(null);
-    setBusy("Reading your sheet…");
-    try {
-      const images = await Promise.all(hwFiles.slice(0, 8).map(fileToBase64));
-      const res = await fetch("/api/vision/homework", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ images_base64: images }),
-      });
-      const json = (await res.json()) as { ok?: boolean; extracted?: ExtractedHomework; error?: string };
-      if (!res.ok || !json.ok || !json.extracted) throw new Error(json.error || "Vision failed");
-      setExtracted(json.extracted);
-      setDraftFullText(json.extracted.full_german_text);
-      setPendingSheetReview(true);
-      setRewardTick((x) => x + 1);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Upload failed");
-    } finally {
-      setBusy(null);
-    }
+    goToStep("b_notebook");
   }
 
   async function runVisionNotebook() {
@@ -676,105 +875,65 @@ export function QuestClient({
 
       {step !== "a_upload" && !extracted && step !== "done" ? (
         <div className="rounded-xl border-2 border-amber-300 bg-amber-900/30 p-4 text-sm">
-          <p className="font-bold">Scan your homework sheet first.</p>
+          <p className="font-bold">Type your homework text first.</p>
           <button
             type="button"
             className="mt-3 rounded-lg bg-[#f4d03f] px-4 py-2 font-black text-[#2d1f18]"
             onClick={() => navigateToStep("a_upload")}
           >
-            Go to homework photo
+            Go to homework text
           </button>
         </div>
       ) : null}
 
-      {/* a — photo then confirm/edit text */}
-      {step === "a_upload" && extracted && pendingSheetReview ? (
+      {/* a — manual homework text (no photo scanning) */}
+      {step === "a_upload" ? (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">Is this the right homework text?</h2>
+          <h2 className="text-xl font-black">Type the homework text</h2>
           <p className="mt-2 text-sm text-white/90">
-            Fix spelling or typing if the scan missed something. This is the text Elio will copy
-            and practice.
+            We removed the homework-photo scan (it was too unreliable). Type the German text here
+            exactly as the teacher wrote it (umlauts, ß, and capitals).
           </p>
+
+          <label className="mt-4 block text-sm font-bold text-white/90">Title (optional)</label>
+          <input
+            value={draftTitle}
+            onChange={(e) => setDraftTitle(e.target.value)}
+            className="mt-2 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 text-base font-bold text-black"
+            autoComplete="off"
+          />
+
+          <label className="mt-4 block text-sm font-bold text-white/90">German text to copy</label>
           <textarea
             value={draftFullText}
             onChange={(e) => setDraftFullText(e.target.value)}
-            rows={8}
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 font-mono text-base text-black"
+            rows={10}
+            className="mt-2 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 font-mono text-base text-black"
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
           />
-          {extracted.main_task_summary_en ? (
-            <p className="mt-3 rounded-lg bg-black/20 p-3 text-sm">
-              <span className="font-bold text-[#f4d03f]">What to do: </span>
-              {extracted.main_task_summary_en}
-            </p>
-          ) : null}
-          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-            <button
-              type="button"
-              className="flex-1 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-lg font-black text-[#2d1f18]"
-              onClick={confirmSheetToNotebook}
-            >
-              Looks good — next: notebook
-            </button>
-            <button
-              type="button"
-              className="flex-1 rounded-xl border-2 border-white/40 py-4 font-bold"
-              onClick={() => setPendingSheetReview(false)}
-            >
-              Back to photo
-            </button>
-          </div>
-        </section>
-      ) : null}
 
-      {step === "a_upload" && (!extracted || !pendingSheetReview) ? (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">Homework sheet photo</h2>
-          <p className="mt-2 text-sm text-white/90">
-            Ask a grown-up to take a clear photo of the whole sheet.
-          </p>
-          {extracted && !pendingSheetReview ? (
-            <button
-              type="button"
-              className="mt-3 w-full rounded-lg border-2 border-amber-300 bg-amber-900/40 py-3 text-sm font-bold"
-              onClick={() => {
-                setDraftFullText(extracted.full_german_text);
-                setPendingSheetReview(true);
-              }}
-            >
-              Edit scanned text (if something was wrong)
-            </button>
-          ) : null}
-          <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              multiple
-              className="sr-only"
-              onChange={(e) => setHwFiles(Array.from(e.target.files || []))}
-            />
-            <span className="text-lg font-black">📷 Tap here to add photos</span>
-            <span className="mt-1 text-sm font-semibold text-white/85">
-              Use camera or photo library — you can pick several pictures
-            </span>
+          <label className="mt-4 block text-sm font-bold text-white/90">
+            Instructions (optional, one per line)
           </label>
-          {hwFiles.length > 0 ? (
-            <ul className="mt-3 space-y-1 rounded-lg bg-black/20 px-3 py-2 text-sm">
-              {hwFiles.map((f) => (
-                <li key={f.name + f.size}>✓ {f.name}</li>
-              ))}
-            </ul>
-          ) : null}
+          <textarea
+            value={draftInstructions}
+            onChange={(e) => setDraftInstructions(e.target.value)}
+            rows={4}
+            className="mt-2 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 text-base text-black"
+            autoComplete="off"
+            autoCorrect="on"
+            spellCheck={true}
+          />
+
           <button
             type="button"
-            disabled={!hwFiles.length || !!busy}
-            onClick={() => void runVisionHomework()}
+            disabled={!!busy}
+            onClick={saveManualHomeworkAndContinue}
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:opacity-50"
           >
-            {busy || "Scan sheet"}
+            {busy || "Save & go to notebook"}
           </button>
         </section>
       ) : null}
@@ -1077,6 +1236,180 @@ export function QuestClient({
           >
             🔊 Listen to this sentence (slow)
           </button>
+
+          <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/20 p-3">
+            <p className="text-sm font-bold text-[#f4d03f]">Listening check</p>
+            <p className="mt-1 text-xs text-white/80">
+              Tap <strong>Start</strong>, read the sentence out loud, then we mark each word as right/wrong.
+            </p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              {listenState.kind !== "listening" ? (
+                <button
+                  type="button"
+                  className="flex-1 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
+                  onClick={() => {
+                    const s = sentencesFromExtracted(extracted)[fSentenceIdx] || "";
+                    if (s) startListeningCheck(s);
+                  }}
+                >
+                  🎙️ Start listening check
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="flex-1 rounded-xl border-4 border-red-300 bg-red-900/30 py-3 text-base font-black text-white"
+                  onClick={stopSpeechRec}
+                >
+                  Stop
+                </button>
+              )}
+              <button
+                type="button"
+                className="flex-1 rounded-xl border-2 border-white/30 py-3 text-base font-bold"
+                onClick={() => setListenState({ kind: "idle" })}
+              >
+                Clear
+              </button>
+            </div>
+
+            {listenState.kind === "listening" ? (
+              <p className="mt-3 rounded-lg bg-[#f4d03f]/15 p-3 text-sm font-bold">
+                Listening… read now (sentence is highlighted below)
+              </p>
+            ) : null}
+            {listenState.kind === "error" ? (
+              <p className="mt-3 rounded-lg bg-red-900/30 p-3 text-sm">{listenState.message}</p>
+            ) : null}
+            {listenState.kind === "done" ? (
+              <div className="mt-3 rounded-lg bg-black/30 p-3">
+                <p className="text-sm font-bold">
+                  Score: <span className="text-[#f4d03f]">{listenState.scorePct}%</span>
+                </p>
+                <p className="mt-2 text-xs font-bold uppercase tracking-wide text-white/70">
+                  What we heard
+                </p>
+                <p className="mt-1 whitespace-pre-wrap text-sm">{listenState.transcript}</p>
+              </div>
+            ) : null}
+          </div>
+
+          {/* Sentence display with per-word highlights when we have a result */}
+          {(() => {
+            const s = sentencesFromExtracted(extracted)[fSentenceIdx] || "";
+            const toks = tokenizeWords(s);
+            if (!s) return null;
+            const isActive = listenState.kind === "listening";
+            const hasResult = listenState.kind === "done";
+            return (
+              <div
+                className={`mt-4 rounded-xl border-4 p-4 text-xl font-semibold leading-relaxed ${
+                  isActive ? "border-[#f4d03f] bg-[#f4d03f]/10" : "border-white/20 bg-black/10"
+                }`}
+              >
+                {toks.map(({ w, i }) => {
+                  const ok = hasResult ? Boolean((listenState as any).wordOk?.[i]) : null;
+                  return (
+                    <span
+                      key={`ls-${i}-${w}`}
+                      className={`mr-1 inline-block rounded px-1.5 py-0.5 ${
+                        ok === null ? ""
+                        : ok ? "bg-green-600/40 ring-2 ring-green-400"
+                        : "bg-red-700/40 ring-2 ring-red-400"
+                      }`}
+                    >
+                      {w}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {/* Writing game */}
+          <div className="mt-6 rounded-xl border-2 border-white/20 bg-black/20 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-bold text-[#f4d03f]">Writing game</p>
+              <button
+                type="button"
+                className="rounded-lg border-2 border-white/30 px-3 py-1.5 text-xs font-bold"
+                onClick={resetWritingGame}
+              >
+                Restart
+              </button>
+            </div>
+            {(() => {
+              const { sents, idx, sentence } = currentWritingSentence(extracted);
+              const words = tokenizeWords(sentence).map((x) => x.w);
+              const target = words[writeState.wordIdx] || "";
+              const totalSentences = sents.length || 1;
+              if (!sentence) return <p className="mt-2 text-sm">No sentence found.</p>;
+              return (
+                <>
+                  <p className="mt-2 text-xs text-white/80">
+                    Sentence {idx + 1} / {totalSentences}
+                  </p>
+                  <p className="mt-3 text-xs font-bold uppercase tracking-wide text-white/70">
+                    Type this word
+                  </p>
+                  <div className="mt-2 rounded-xl border-4 border-[#2d1f18] bg-white p-4 text-center text-3xl font-black text-black">
+                    {target || "—"}
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-3 w-full rounded-xl bg-white/10 py-3 text-sm font-bold"
+                    onClick={() => void playTts(target, "de", 0.78)}
+                    disabled={!target}
+                  >
+                    Hear word (slow)
+                  </button>
+                  <input
+                    value={writeState.typed}
+                    onChange={(e) => setWriteState((s) => ({ ...s, typed: e.target.value }))}
+                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                  />
+                  <button
+                    type="button"
+                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                    onClick={() => submitWrittenWord(extracted)}
+                    disabled={!target}
+                  >
+                    Submit word
+                  </button>
+
+                  {writeState.showGif ? (
+                    <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/25 p-3">
+                      <p className="text-sm font-bold">
+                        {writeState.showGif.kind === "success" ? "Nice! Sentence passed (≥ 80%)" : "Not yet (under 80%) — try again"}
+                      </p>
+                      <img
+                        src={writeState.showGif.url}
+                        alt=""
+                        className="mt-3 max-h-56 w-full rounded-lg object-contain"
+                      />
+                    </div>
+                  ) : null}
+
+                  {writeState.finished && writeState.finalVideoUrl ? (
+                    <div className="mt-4 rounded-xl border-4 border-[#2d1f18] bg-black/25 p-3">
+                      <p className="text-sm font-black text-[#f4d03f]">You finished the whole text!</p>
+                      <div className="mt-3 aspect-video w-full overflow-hidden rounded-lg">
+                        <iframe
+                          className="h-full w-full"
+                          src={writeState.finalVideoUrl}
+                          title="Reward video"
+                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                          allowFullScreen
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()}
+          </div>
+
           <GermanWordBlock
             extracted={extracted}
             sentenceIndex={fSentenceIdx}
