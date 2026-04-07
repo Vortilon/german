@@ -227,6 +227,21 @@ export function QuestClient({
     return pool[Math.floor(Math.random() * pool.length)]!;
   }
 
+  /** Prefer another unmastered word than `avoidIdx` so we don’t repeat the same prompt back-to-back. */
+  function pickRandomUnmasteredAvoiding(mastered: boolean[], avoidIdx: number): number {
+    const pool: number[] = [];
+    const poolOther: number[] = [];
+    for (let i = 0; i < mastered.length; i++) {
+      if (!mastered[i]) {
+        pool.push(i);
+        if (i !== avoidIdx) poolOther.push(i);
+      }
+    }
+    if (!pool.length) return avoidIdx;
+    const use = poolOther.length ? poolOther : pool;
+    return use[Math.floor(Math.random() * use.length)]!;
+  }
+
   function dictationHint(expected: string, written: string): string {
     const hints: string[] = [];
     if (expected !== written && expected.toLowerCase() === written.toLowerCase()) {
@@ -254,12 +269,20 @@ export function QuestClient({
     const totalAttempts = d.totalAttempts + 1;
 
     if (!ok) {
+      const nextIdx = pickRandomUnmasteredAvoiding(d.mastered, d.currentIdx);
+      const nextWord = d.words[nextIdx]!;
       setDictation({
         ...d,
+        currentIdx: nextIdx,
         feedback: { kind: "wrong", expected, written },
         typed: "",
         totalAttempts,
       });
+      try {
+        await playTts(nextWord, "de", 0.78);
+      } catch {
+        /* ignore */
+      }
       return;
     }
 
@@ -1500,7 +1523,9 @@ export function QuestClient({
             <strong>Hear again</strong> if needed). Type what you hear and tap <strong>Check</strong>. When it’s
             right, you’ll hear a <strong>little celebration sound</strong>, then the <strong>next word</strong> is
             spoken automatically — we don’t show the answer. If it’s wrong, you’ll see what you wrote vs the
-            correct spelling. Progress is <strong>100%</strong> when every word has been spelled correctly once.
+            correct spelling for that try, then we <strong>move on</strong> to another word (the new word plays
+            aloud). Words you miss stay in the pool until you spell them correctly later. Progress is{" "}
+            <strong>100%</strong> when every word has been spelled correctly once.
           </p>
 
           {!dictation || dictation.words.length === 0 ? (
@@ -1584,7 +1609,7 @@ export function QuestClient({
 
                         {d.feedback.kind === "wrong" ? (
                           <div className="rounded-xl border-2 border-red-400 bg-red-900/30 p-4 text-left">
-                            <p className="font-black text-lg">Not quite — try again</p>
+                            <p className="font-black text-lg">Not quite — that word will come back later</p>
                             <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
                               <div className="rounded-lg bg-black/25 p-2">
                                 <p className="text-xs font-bold uppercase text-white/60">You wrote</p>
@@ -1599,6 +1624,10 @@ export function QuestClient({
                             </div>
                             <p className="mt-3 text-sm text-white/90">
                               {dictationHint(d.feedback.expected, d.feedback.written)}
+                            </p>
+                            <p className="mt-3 text-sm font-semibold text-[#f4d03f]">
+                              The <strong>next word</strong> was just read aloud — type what you hear for that
+                              word (use Hear again if you need a repeat).
                             </p>
                           </div>
                         ) : null}
