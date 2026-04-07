@@ -28,6 +28,7 @@ import { GermanWordBlock } from "@/components/GermanWordBlock";
 import { ListenInlineSentence } from "@/components/ListenInlineSentence";
 import { fetchWordMeaning, makeMeaningCache } from "@/lib/word-meaning-client";
 import { formatSpeechRecognitionError } from "@/lib/speech-rec-errors";
+import { playDictationCompleteFanfare, playDictationCorrectChime } from "@/lib/reward-sounds";
 import { playTts } from "@/lib/play-tts";
 import {
   sentenceEnglishLines,
@@ -161,12 +162,14 @@ export function QuestClient({
     mastered: boolean[];
     currentIdx: number;
     typed: string;
-    feedback:
-      | { kind: "none" }
-      | { kind: "result"; ok: boolean; expected: string; written: string };
+    feedback: { kind: "none" } | { kind: "wrong"; expected: string; written: string };
     totalAttempts: number;
     complete: boolean;
   } | null>(null);
+  const dictationRef = useRef(dictation);
+  useEffect(() => {
+    dictationRef.current = dictation;
+  }, [dictation]);
 
   const DICTATION_VIDEO_URL = "https://www.youtube.com/embed/dQw4w9WgXcQ";
 
@@ -199,6 +202,10 @@ export function QuestClient({
       const words = tokenizeWords(extracted.full_german_text).map((x) => x.w);
       if (words.length === 0) return null;
       const currentIdx = Math.floor(Math.random() * words.length);
+      const first = words[currentIdx]!;
+      queueMicrotask(() => {
+        void playTts(first, "de", 0.78);
+      });
       return {
         words,
         mastered: words.map(() => false),
@@ -238,45 +245,67 @@ export function QuestClient({
     return hints.length ? hints.join(" ") : "Compare letter by letter with the correct word below.";
   }
 
-  function submitDictation() {
-    setDictation((d) => {
-      if (!d || d.complete) return d;
-      const expected = d.words[d.currentIdx]!;
-      const written = d.typed.trim();
-      const ok = normalizeSpokenWord(written) === normalizeSpokenWord(expected);
-      const totalAttempts = d.totalAttempts + 1;
-      if (!ok) {
-        return {
-          ...d,
-          feedback: { kind: "result", ok: false, expected, written },
-          typed: "",
-          totalAttempts,
-        };
-      }
-      const mastered = [...d.mastered];
-      mastered[d.currentIdx] = true;
-      const done = mastered.filter(Boolean).length;
-      const total = d.words.length;
-      if (done >= total) {
-        return {
-          ...d,
-          mastered,
-          feedback: { kind: "result", ok: true, expected, written },
-          typed: "",
-          totalAttempts,
-          complete: true,
-        };
-      }
-      const nextIdx = pickRandomUnmasteredIndex(mastered);
-      return {
+  async function submitDictation() {
+    const d = dictationRef.current;
+    if (!d || d.complete) return;
+    const expected = d.words[d.currentIdx]!;
+    const written = d.typed.trim();
+    const ok = normalizeSpokenWord(written) === normalizeSpokenWord(expected);
+    const totalAttempts = d.totalAttempts + 1;
+
+    if (!ok) {
+      setDictation({
+        ...d,
+        feedback: { kind: "wrong", expected, written },
+        typed: "",
+        totalAttempts,
+      });
+      return;
+    }
+
+    const mastered = [...d.mastered];
+    mastered[d.currentIdx] = true;
+    const done = mastered.filter(Boolean).length;
+    const total = d.words.length;
+
+    if (done >= total) {
+      setDictation({
         ...d,
         mastered,
-        currentIdx: nextIdx,
         typed: "",
-        feedback: { kind: "result", ok: true, expected, written },
+        feedback: { kind: "none" },
         totalAttempts,
-      };
+        complete: true,
+      });
+      try {
+        await playDictationCompleteFanfare();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    const nextIdx = pickRandomUnmasteredIndex(mastered);
+    const nextWord = d.words[nextIdx]!;
+    setDictation({
+      ...d,
+      mastered,
+      currentIdx: nextIdx,
+      typed: "",
+      feedback: { kind: "none" },
+      totalAttempts,
     });
+
+    try {
+      await playDictationCorrectChime();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await playTts(nextWord, "de", 0.78);
+    } catch {
+      /* ignore */
+    }
   }
 
   function resetDictationSession() {
@@ -286,14 +315,19 @@ export function QuestClient({
       setDictation(null);
       return;
     }
+    const currentIdx = Math.floor(Math.random() * words.length);
+    const first = words[currentIdx]!;
     setDictation({
       words,
       mastered: words.map(() => false),
-      currentIdx: Math.floor(Math.random() * words.length),
+      currentIdx,
       typed: "",
       feedback: { kind: "none" },
       totalAttempts: 0,
       complete: false,
+    });
+    queueMicrotask(() => {
+      void playTts(first, "de", 0.78);
     });
   }
 
@@ -1462,10 +1496,11 @@ export function QuestClient({
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Dictation (type what you hear)</h2>
           <p className="mt-2 text-sm text-white/90">
-            The computer picks a <strong>random word</strong> from your homework. Type what you hear. If it’s
-            wrong, you’ll see <strong>what you wrote</strong> vs <strong>the right spelling</strong> — try again
-            until it’s right. Progress hits <strong>100%</strong> when every word has been spelled correctly
-            once (you may see words again until they’re all done).
+            The computer picks a <strong>random word</strong> and <strong>reads it aloud</strong> (you can use{" "}
+            <strong>Hear again</strong> if needed). Type what you hear and tap <strong>Check</strong>. When it’s
+            right, you’ll hear a <strong>little celebration sound</strong>, then the <strong>next word</strong> is
+            spoken automatically — we don’t show the answer. If it’s wrong, you’ll see what you wrote vs the
+            correct spelling. Progress is <strong>100%</strong> when every word has been spelled correctly once.
           </p>
 
           {!dictation || dictation.words.length === 0 ? (
@@ -1511,18 +1546,19 @@ export function QuestClient({
                       </div>
                     ) : (
                       <>
+                        <p className="text-xs text-white/75">
+                          The word plays automatically. Use <strong>Hear again</strong> only if you need a
+                          repeat.
+                        </p>
                         <button
                           type="button"
-                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
+                          className="w-full rounded-xl border-2 border-white/35 bg-white/10 py-2.5 text-sm font-bold"
                           onClick={() => {
                             void playTts(target, "de", 0.78);
-                            setDictation((prev) =>
-                              prev ? { ...prev, feedback: { kind: "none" } } : prev,
-                            );
                           }}
                           disabled={!target}
                         >
-                          🔊 Hear the word (slow)
+                          🔊 Hear again (slow)
                         </button>
 
                         <input
@@ -1539,22 +1575,16 @@ export function QuestClient({
 
                         <button
                           type="button"
-                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-white/10 py-3 font-black"
-                          onClick={() => submitDictation()}
+                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                          onClick={() => void submitDictation()}
                           disabled={!target || d.complete}
                         >
                           Check
                         </button>
 
-                        {d.feedback.kind === "result" ? (
-                          <div
-                            className={`rounded-xl border-2 p-4 text-left ${
-                              d.feedback.ok ? "border-green-400 bg-green-900/35" : "border-red-400 bg-red-900/30"
-                            }`}
-                          >
-                            <p className="font-black text-lg">
-                              {d.feedback.ok ? "Correct!" : "Not quite — try again"}
-                            </p>
+                        {d.feedback.kind === "wrong" ? (
+                          <div className="rounded-xl border-2 border-red-400 bg-red-900/30 p-4 text-left">
+                            <p className="font-black text-lg">Not quite — try again</p>
                             <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
                               <div className="rounded-lg bg-black/25 p-2">
                                 <p className="text-xs font-bold uppercase text-white/60">You wrote</p>
@@ -1567,15 +1597,9 @@ export function QuestClient({
                                 <p className="text-lg font-bold text-[#f4d03f]">{d.feedback.expected}</p>
                               </div>
                             </div>
-                            {!d.feedback.ok ? (
-                              <p className="mt-3 text-sm text-white/90">
-                                {dictationHint(d.feedback.expected, d.feedback.written)}
-                              </p>
-                            ) : !d.complete ? (
-                              <p className="mt-3 text-sm font-semibold text-white/90">
-                                Next random word — tap <strong>Hear the word</strong> again.
-                              </p>
-                            ) : null}
+                            <p className="mt-3 text-sm text-white/90">
+                              {dictationHint(d.feedback.expected, d.feedback.written)}
+                            </p>
                           </div>
                         ) : null}
                       </>
