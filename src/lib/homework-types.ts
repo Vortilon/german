@@ -2,7 +2,6 @@ export type HomeworkProgressStep =
   | "a_upload"
   | "b_notebook"
   | "c_guide"
-  | "d_interactive"
   | "e_read_aloud"
   | "f_user_read"
   | "g_dictation"

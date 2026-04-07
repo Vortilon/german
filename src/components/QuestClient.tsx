@@ -21,9 +21,12 @@ import {
   QUEST_STEP_LABELS,
   QUEST_STEP_ORDER,
   inferFurthestIndex,
+  migrateProgressStep,
   stepIndex,
 } from "@/lib/quest-steps";
 import { GermanWordBlock } from "@/components/GermanWordBlock";
+import { ListenInlineSentence } from "@/components/ListenInlineSentence";
+import { fetchWordMeaning, makeMeaningCache } from "@/lib/word-meaning-client";
 import { playTts } from "@/lib/play-tts";
 import {
   sentenceEnglishLines,
@@ -98,6 +101,40 @@ export function QuestClient({
   const [err, setErr] = useState<string | null>(null);
   const [rewardTick, setRewardTick] = useState(0);
   const readListRef = useRef<HTMLDivElement>(null);
+  const listenMeaningCacheRef = useRef(makeMeaningCache());
+  const listenHoldRef = useRef(false);
+  const [listenTip, setListenTip] = useState<{ word: string; text: string } | null>(null);
+
+  const glossaryForListen = useMemo(() => {
+    const m = new Map<string, string>();
+    extracted?.special_words.forEach((x) => m.set(x.de.toLowerCase(), x.en));
+    return m;
+  }, [extracted?.special_words]);
+
+  const onListenWordDown = useCallback(
+    async (word: string, sentence: string) => {
+      listenHoldRef.current = true;
+      setListenTip({ word, text: "…" });
+      try {
+        await playTts(word, "de", 0.82);
+      } catch {
+        /* ignore */
+      }
+      const text = await fetchWordMeaning(
+        word,
+        sentence,
+        glossaryForListen,
+        listenMeaningCacheRef.current,
+      );
+      if (listenHoldRef.current) setListenTip({ word, text });
+    },
+    [glossaryForListen],
+  );
+
+  const onListenWordUp = useCallback(() => {
+    listenHoldRef.current = false;
+    setListenTip(null);
+  }, []);
 
   const [highlightSentence, setHighlightSentence] = useState(0);
   const [spellTarget, setSpellTarget] = useState<{ word: string; idx: number } | null>(
@@ -409,9 +446,15 @@ export function QuestClient({
             if (bundle.extracted) setExtracted(bundle.extracted);
             if (bundle.progress) {
               const bp = bundle.progress as HomeworkProgress;
+              const migratedStep = migrateProgressStep(String(bp.step));
+              const maxIdx = QUEST_STEP_ORDER.length - 1;
               setProgress({
                 ...bp,
-                furthest_index: inferFurthestIndex(bp.step, bp.furthest_index),
+                step: migratedStep,
+                furthest_index: Math.min(
+                  inferFurthestIndex(migratedStep, bp.furthest_index),
+                  maxIdx,
+                ),
               });
             }
             if (bundle.handwriting) setHandwriting(bundle.handwriting);
@@ -432,9 +475,15 @@ export function QuestClient({
         if (row?.extracted) setExtracted(row.extracted);
         if (row?.progress) {
           const rp = row.progress as HomeworkProgress;
+          const migratedStep = migrateProgressStep(String(rp.step));
+          const maxIdx = QUEST_STEP_ORDER.length - 1;
           setProgress({
             ...rp,
-            furthest_index: inferFurthestIndex(rp.step, rp.furthest_index),
+            step: migratedStep,
+            furthest_index: Math.min(
+              inferFurthestIndex(migratedStep, rp.furthest_index),
+              maxIdx,
+            ),
           });
         }
         if (row?.handwriting) setHandwriting(row.handwriting);
@@ -1102,28 +1151,9 @@ export function QuestClient({
           <button
             type="button"
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
-            onClick={() => goToStep("d_interactive")}
-          >
-            Continue
-          </button>
-        </section>
-      )}
-
-      {/* d */}
-      {step === "d_interactive" && extracted && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">Tap words</h2>
-          <p className="mt-2 text-sm text-white/90">
-            On a phone: <span className="font-bold text-[#f4d03f]">tap</span> a word to hear it and
-            see the English under the box.
-          </p>
-          <GermanWordBlock extracted={extracted} showSentenceEnglish={false} className="mt-4" />
-          <button
-            type="button"
-            className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
             onClick={() => goToStep("e_read_aloud")}
           >
-            Next: listen
+            Continue
           </button>
         </section>
       )}
@@ -1133,39 +1163,50 @@ export function QuestClient({
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Listen</h2>
           <p className="mt-2 text-sm text-white/90">
-            Read the whole text below. Pick a sentence, then play — slower is easier.
+            The whole passage is below. <strong>Tap a sentence</strong> to choose what plays.{" "}
+            <strong>Press a word</strong> in that sentence to hear it and see a short English meaning
+            (release to hide).
           </p>
           <div
             ref={readListRef}
-            className="mt-3 max-h-64 overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-2 text-sm leading-relaxed"
+            className="mt-3 max-h-[min(28rem,55vh)] overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-2 text-sm leading-relaxed"
           >
             {readSents.map((line, i) => (
-              <button
+              <div
                 key={i}
-                type="button"
-                onClick={() => setHighlightSentence(i)}
                 data-sent-idx={i}
-                className={`mb-2 w-full rounded px-2 py-2 text-left transition active:scale-[0.995] ${
+                role="presentation"
+                onClick={() => setHighlightSentence(i)}
+                className={`mb-2 w-full cursor-pointer rounded-lg px-2 py-2 text-left transition ${
                   i === highlightSentence ?
                     "bg-[#f4d03f]/25 ring-2 ring-[#f4d03f]"
                   : "hover:bg-white/5"
                 }`}
               >
-                <span className="text-white/50">{i + 1}. </span>
-                <span className="text-white">{line}</span>
-              </button>
+                <span className="mr-1 align-top font-bold text-white/50">{i + 1}.</span>
+                <ListenInlineSentence
+                  sentence={line}
+                  onWordPointerDown={(lemma) => void onListenWordDown(lemma, line)}
+                  onWordPointerUp={onListenWordUp}
+                />
+              </div>
             ))}
           </div>
           <p className="mt-3 text-xs text-white/70">
-            Tip: the highlighted sentence is the one that will be played.
+            The yellow outline is the sentence that will play. Tap another line to switch.
           </p>
 
-          <div className="mt-4">
-            <GermanWordBlock extracted={extracted} sentenceIndex={highlightSentence} />
-          </div>
+          {listenTip ? (
+            <div className="mt-3 rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-left shadow-lg">
+              <p className="text-xs font-bold uppercase tracking-wide text-white/60">Meaning</p>
+              <p className="text-lg font-black text-[#f4d03f]">{listenTip.word}</p>
+              <p className="mt-1 text-sm text-white/95">{listenTip.text}</p>
+            </div>
+          ) : null}
+
           <p className="mt-4 rounded-lg bg-black/30 p-3 text-base leading-relaxed">
             <span className="font-bold text-[#f4d03f]">English (this sentence): </span>
-            {readTrans[highlightSentence]?.trim() || "— (add translations when scanning next time)"}
+            {readTrans[highlightSentence]?.trim() || "— (add a translation in homework settings later)"}
           </p>
           <p className="mt-3 text-sm font-bold text-white/80">Speaking speed</p>
           <input
@@ -1178,9 +1219,6 @@ export function QuestClient({
             className="mt-1 w-full"
           />
           <p className="text-xs text-white/60">Slower ← {readAloudSpeed.toFixed(2)} → Faster</p>
-          <p className="mt-4 rounded-lg bg-black/20 p-4 text-xl font-semibold leading-relaxed">
-            {readSents[highlightSentence]}
-          </p>
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
             <button
               type="button"
@@ -1352,6 +1390,7 @@ export function QuestClient({
             extracted={extracted}
             sentenceIndex={fSentenceIdx}
             showSentenceEnglish
+            layout="inline"
             className="mt-4"
           />
           <div className="mt-4 flex flex-wrap gap-2">

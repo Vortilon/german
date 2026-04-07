@@ -11,6 +11,16 @@ export function tokenizeWords(text: string): { w: string; i: number }[] {
   return out;
 }
 
+/** Whitespace segments preserving punctuation on the token (for inline tap UI). */
+export function segmentWords(text: string): { raw: string; w: string }[] {
+  const out: { raw: string; w: string }[] = [];
+  for (const raw of text.trim().split(/\s+/)) {
+    const w = raw.replace(/[.,!?;:«»"„"()]/g, "");
+    if (w.length) out.push({ raw, w });
+  }
+  return out;
+}
+
 export function sentencesFromExtracted(ex: ExtractedHomework): string[] {
   const rawLines =
     ex.lines?.length ? ex.lines : ex.full_german_text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
