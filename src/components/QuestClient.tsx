@@ -97,6 +97,7 @@ export function QuestClient({
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [rewardTick, setRewardTick] = useState(0);
+  const readListRef = useRef<HTMLDivElement>(null);
 
   const [highlightSentence, setHighlightSentence] = useState(0);
   const [spellTarget, setSpellTarget] = useState<{ word: string; idx: number } | null>(
@@ -611,6 +612,13 @@ export function QuestClient({
       setBusy(null);
     }
   }
+
+  useEffect(() => {
+    const el = readListRef.current;
+    if (!el) return;
+    const target = el.querySelector(`[data-sent-idx="${highlightSentence}"]`) as HTMLElement | null;
+    if (target) target.scrollIntoView({ block: "nearest" });
+  }, [highlightSentence]);
 
   const readSents = extracted ? sentencesFromExtracted(extracted) : [];
   const readTrans = extracted ? sentenceEnglishLines(extracted) : [];
@@ -1127,18 +1135,33 @@ export function QuestClient({
           <p className="mt-2 text-sm text-white/90">
             Read the whole text below. Pick a sentence, then play — slower is easier.
           </p>
-          <div className="mt-3 max-h-48 overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-sm leading-relaxed">
+          <div
+            ref={readListRef}
+            className="mt-3 max-h-64 overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-2 text-sm leading-relaxed"
+          >
             {readSents.map((line, i) => (
-              <p
+              <button
                 key={i}
-                className={`mb-2 rounded px-2 py-1 ${
-                  i === highlightSentence ? "bg-[#f4d03f]/25 ring-2 ring-[#f4d03f]" : ""
+                type="button"
+                onClick={() => setHighlightSentence(i)}
+                data-sent-idx={i}
+                className={`mb-2 w-full rounded px-2 py-2 text-left transition active:scale-[0.995] ${
+                  i === highlightSentence ?
+                    "bg-[#f4d03f]/25 ring-2 ring-[#f4d03f]"
+                  : "hover:bg-white/5"
                 }`}
               >
                 <span className="text-white/50">{i + 1}. </span>
-                {line}
-              </p>
+                <span className="text-white">{line}</span>
+              </button>
             ))}
+          </div>
+          <p className="mt-3 text-xs text-white/70">
+            Tip: the highlighted sentence is the one that will be played.
+          </p>
+
+          <div className="mt-4">
+            <GermanWordBlock extracted={extracted} sentenceIndex={highlightSentence} />
           </div>
           <p className="mt-4 rounded-lg bg-black/30 p-3 text-base leading-relaxed">
             <span className="font-bold text-[#f4d03f]">English (this sentence): </span>
@@ -1325,91 +1348,6 @@ export function QuestClient({
             );
           })()}
 
-          {/* Writing game */}
-          <div className="mt-6 rounded-xl border-2 border-white/20 bg-black/20 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-sm font-bold text-[#f4d03f]">Writing game</p>
-              <button
-                type="button"
-                className="rounded-lg border-2 border-white/30 px-3 py-1.5 text-xs font-bold"
-                onClick={resetWritingGame}
-              >
-                Restart
-              </button>
-            </div>
-            {(() => {
-              const { sents, idx, sentence } = currentWritingSentence(extracted);
-              const words = tokenizeWords(sentence).map((x) => x.w);
-              const target = words[writeState.wordIdx] || "";
-              const totalSentences = sents.length || 1;
-              if (!sentence) return <p className="mt-2 text-sm">No sentence found.</p>;
-              return (
-                <>
-                  <p className="mt-2 text-xs text-white/80">
-                    Sentence {idx + 1} / {totalSentences}
-                  </p>
-                  <p className="mt-3 text-xs font-bold uppercase tracking-wide text-white/70">
-                    Type this word
-                  </p>
-                  <div className="mt-2 rounded-xl border-4 border-[#2d1f18] bg-white p-4 text-center text-3xl font-black text-black">
-                    {target || "—"}
-                  </div>
-                  <button
-                    type="button"
-                    className="mt-3 w-full rounded-xl bg-white/10 py-3 text-sm font-bold"
-                    onClick={() => void playTts(target, "de", 0.78)}
-                    disabled={!target}
-                  >
-                    Hear word (slow)
-                  </button>
-                  <input
-                    value={writeState.typed}
-                    onChange={(e) => setWriteState((s) => ({ ...s, typed: e.target.value }))}
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                  />
-                  <button
-                    type="button"
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
-                    onClick={() => submitWrittenWord(extracted)}
-                    disabled={!target}
-                  >
-                    Submit word
-                  </button>
-
-                  {writeState.showGif ? (
-                    <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/25 p-3">
-                      <p className="text-sm font-bold">
-                        {writeState.showGif.kind === "success" ? "Nice! Sentence passed (≥ 80%)" : "Not yet (under 80%) — try again"}
-                      </p>
-                      <img
-                        src={writeState.showGif.url}
-                        alt=""
-                        className="mt-3 max-h-56 w-full rounded-lg object-contain"
-                      />
-                    </div>
-                  ) : null}
-
-                  {writeState.finished && writeState.finalVideoUrl ? (
-                    <div className="mt-4 rounded-xl border-4 border-[#2d1f18] bg-black/25 p-3">
-                      <p className="text-sm font-black text-[#f4d03f]">You finished the whole text!</p>
-                      <div className="mt-3 aspect-video w-full overflow-hidden rounded-lg">
-                        <iframe
-                          className="h-full w-full"
-                          src={writeState.finalVideoUrl}
-                          title="Reward video"
-                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                          allowFullScreen
-                        />
-                      </div>
-                    </div>
-                  ) : null}
-                </>
-              );
-            })()}
-          </div>
-
           <GermanWordBlock
             extracted={extracted}
             sentenceIndex={fSentenceIdx}
@@ -1441,6 +1379,98 @@ export function QuestClient({
           <button
             type="button"
             className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
+            onClick={() => goToStep("g_dictation")}
+          >
+            Next: dictation
+          </button>
+        </section>
+      )}
+
+      {/* g — dictation */}
+      {step === "g_dictation" && extracted && (
+        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+          <h2 className="text-xl font-black">Dictation (type what you hear)</h2>
+          <p className="mt-2 text-sm text-white/90">
+            The computer says a word. Elio types it. The word is <strong>not shown</strong> until he submits.
+          </p>
+
+          <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/20 p-4">
+            {(() => {
+              const { sents, idx, sentence } = currentWritingSentence(extracted);
+              const words = tokenizeWords(sentence).map((x) => x.w);
+              const target = words[writeState.wordIdx] || "";
+              const totalSentences = sents.length || 1;
+              const wordNumber = writeState.wordIdx + 1;
+              const totalWords = words.length || 1;
+              return (
+                <>
+                  <p className="text-xs text-white/80">
+                    Sentence {idx + 1} / {totalSentences} • Word {wordNumber} / {totalWords}
+                  </p>
+
+                  <button
+                    type="button"
+                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
+                    onClick={() => void playTts(target, "de", 0.78)}
+                    disabled={!target}
+                  >
+                    🔊 Hear the word (slow)
+                  </button>
+
+                  <input
+                    value={writeState.typed}
+                    onChange={(e) => setWriteState((s) => ({ ...s, typed: e.target.value }))}
+                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                  />
+
+                  <button
+                    type="button"
+                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-white/10 py-3 font-black"
+                    onClick={() => submitWrittenWord(extracted)}
+                    disabled={!target}
+                  >
+                    Submit
+                  </button>
+
+                  {writeState.showGif ? (
+                    <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/25 p-3">
+                      <p className="text-sm font-bold">
+                        {writeState.showGif.kind === "success"
+                          ? "Nice! Sentence passed (≥ 80%)"
+                          : "Not yet (under 80%) — try again"}
+                      </p>
+                      <img
+                        src={writeState.showGif.url}
+                        alt=""
+                        className="mt-3 max-h-56 w-full rounded-lg object-contain"
+                      />
+                    </div>
+                  ) : null}
+
+                  {writeState.finished && writeState.finalVideoUrl ? (
+                    <div className="mt-4 rounded-xl border-4 border-[#2d1f18] bg-black/25 p-3">
+                      <p className="text-sm font-black text-[#f4d03f]">You finished the whole text!</p>
+                      <div className="mt-3 aspect-video w-full overflow-hidden rounded-lg">
+                        <iframe
+                          className="h-full w-full"
+                          src={writeState.finalVideoUrl}
+                          title="Reward video"
+                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                          allowFullScreen
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()}
+          </div>
+
+          <button
+            type="button"
+            className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
             onClick={() => goToStep("g_repeat_spelling")}
           >
             Next: practice & spelling

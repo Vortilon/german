@@ -8,18 +8,20 @@ export const QUEST_STEP_ORDER: HomeworkProgressStep[] = [
   "d_interactive",
   "e_read_aloud",
   "f_user_read",
+  "g_dictation",
   "g_repeat_spelling",
   "h_report",
   "done",
 ];
 
 export const QUEST_STEP_LABELS: Record<HomeworkProgressStep, string> = {
-  a_upload: "Homework photo",
+  a_upload: "Homework text",
   b_notebook: "Notebook copy",
   c_guide: "What to do",
   d_interactive: "Tap words",
   e_read_aloud: "Listen",
   f_user_read: "You read",
+  g_dictation: "Dictation",
   g_repeat_spelling: "Practice & spelling",
   h_report: "Parent report",
   done: "All done",

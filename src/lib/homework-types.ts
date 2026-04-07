@@ -5,6 +5,7 @@ export type HomeworkProgressStep =
   | "d_interactive"
   | "e_read_aloud"
   | "f_user_read"
+  | "g_dictation"
   | "g_repeat_spelling"
   | "h_report"
   | "done";

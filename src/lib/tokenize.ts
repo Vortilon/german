@@ -12,11 +12,17 @@ export function tokenizeWords(text: string): { w: string; i: number }[] {
 }
 
 export function sentencesFromExtracted(ex: ExtractedHomework): string[] {
-  if (ex.lines?.length) return ex.lines.map((l) => l.trim()).filter(Boolean);
-  return ex.full_german_text
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const rawLines =
+    ex.lines?.length ? ex.lines : ex.full_german_text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const line of rawLines) {
+    const chunks = line
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    out.push(...chunks);
+  }
+  return out;
 }
 
 /** English line per sentence, aligned with sentencesFromExtracted when possible. */
