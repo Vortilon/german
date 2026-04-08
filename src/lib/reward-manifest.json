@@ -1,0 +1,27 @@
+{
+  "success": [
+    "/rewards/success/success-01.jpg",
+    "/rewards/success/success-02.jpg",
+    "/rewards/success/success-03.jpg",
+    "/rewards/success/success-04.jpg",
+    "/rewards/success/success-05.jpg",
+    "/rewards/success/success-06.jpg",
+    "/rewards/success/success-07.jpg",
+    "/rewards/success/success-08.jpg",
+    "/rewards/success/success-09.jpg",
+    "/rewards/success/success-10.jpg"
+  ],
+  "fail": [
+    "/rewards/fail/fail-01.jpg",
+    "/rewards/fail/fail-02.jpg",
+    "/rewards/fail/fail-03.jpg",
+    "/rewards/fail/fail-04.jpg",
+    "/rewards/fail/fail-05.jpg",
+    "/rewards/fail/fail-06.jpg",
+    "/rewards/fail/fail-07.jpg",
+    "/rewards/fail/fail-08.jpg",
+    "/rewards/fail/fail-09.jpg",
+    "/rewards/fail/fail-10.jpg"
+  ],
+  "generatedAt": "2026-04-08T16:51:23.936Z"
+}

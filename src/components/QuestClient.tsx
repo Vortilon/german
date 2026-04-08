@@ -29,6 +29,8 @@ import { ListenInlineSentence } from "@/components/ListenInlineSentence";
 import { fetchWordMeaning, makeMeaningCache } from "@/lib/word-meaning-client";
 import { formatSpeechRecognitionError } from "@/lib/speech-rec-errors";
 import { playDictationCompleteFanfare, playDictationCorrectChime } from "@/lib/reward-sounds";
+import rewardManifest from "@/lib/reward-manifest.json";
+import { pickRewardImageUrl } from "@/lib/reward-feedback-images";
 import { playTts } from "@/lib/play-tts";
 import {
   sentenceEnglishLines,
@@ -162,14 +164,25 @@ export function QuestClient({
     mastered: boolean[];
     currentIdx: number;
     typed: string;
-    feedback: { kind: "none" } | { kind: "wrong"; expected: string; written: string };
+    /** After Check: show image + Next before the next listen/type round. */
+    result:
+      | null
+      | { kind: "correct"; imageUrl: string; isFinal: boolean }
+      | { kind: "wrong"; imageUrl: string; expected: string; written: string };
     totalAttempts: number;
     complete: boolean;
+    /** False until the current prompt’s TTS has finished (new word after wrong/correct, or session start). */
+    readyToType: boolean;
+    /** Bumped when a new listen-before-type cycle starts; stale TTS completions do not unlock input. */
+    playEpoch: number;
   } | null>(null);
+  const dictationPlayEpochRef = useRef(0);
+  function bumpDictationPlayEpoch() {
+    dictationPlayEpochRef.current += 1;
+    return dictationPlayEpochRef.current;
+  }
   const dictationRef = useRef(dictation);
-  useEffect(() => {
-    dictationRef.current = dictation;
-  }, [dictation]);
+  dictationRef.current = dictation;
 
   const DICTATION_VIDEO_URL = "https://www.youtube.com/embed/dQw4w9WgXcQ";
 
@@ -203,17 +216,30 @@ export function QuestClient({
       if (words.length === 0) return null;
       const currentIdx = Math.floor(Math.random() * words.length);
       const first = words[currentIdx]!;
+      const playEpoch = bumpDictationPlayEpoch();
       queueMicrotask(() => {
-        void playTts(first, "de", 0.78);
+        void (async () => {
+          try {
+            await playTts(first, "de", 0.78);
+          } catch {
+            /* ignore */
+          } finally {
+            setDictation((prev) =>
+              prev && prev.playEpoch === playEpoch ? { ...prev, readyToType: true } : prev,
+            );
+          }
+        })();
       });
       return {
         words,
         mastered: words.map(() => false),
         currentIdx,
         typed: "",
-        feedback: { kind: "none" },
+        result: null,
         totalAttempts: 0,
         complete: false,
+        readyToType: false,
+        playEpoch,
       };
     });
   }, [progress.step, extracted]);
@@ -262,42 +288,96 @@ export function QuestClient({
 
   async function submitDictation() {
     const d = dictationRef.current;
-    if (!d || d.complete) return;
-    const expected = d.words[d.currentIdx]!;
+    if (!d || d.complete || d.result || !d.readyToType) return;
+    const gradeIdx = d.currentIdx;
+    const expected = d.words[gradeIdx]!;
     const written = d.typed.trim();
     const ok = normalizeDictationWord(written) === normalizeDictationWord(expected);
-    const totalAttempts = d.totalAttempts + 1;
 
     if (!ok) {
+      let imageUrl = "/rewards/fail/fail-01.jpg";
+      try {
+        imageUrl =
+          pickRewardImageUrl("fail", rewardManifest) ?? rewardManifest.fail[0] ?? imageUrl;
+      } catch {
+        /* sessionStorage etc. */
+      }
+      setDictation((prev) => {
+        if (!prev || prev.complete || prev.result) return prev;
+        return {
+          ...prev,
+          result: { kind: "wrong", imageUrl, expected, written },
+          totalAttempts: prev.totalAttempts + 1,
+        };
+      });
+      return;
+    }
+
+    try {
+      await playDictationCorrectChime();
+    } catch {
+      /* ignore */
+    }
+
+    let imageUrl = "/rewards/success/success-01.jpg";
+    try {
+      imageUrl =
+        pickRewardImageUrl("success", rewardManifest) ??
+        rewardManifest.success[0] ??
+        imageUrl;
+    } catch {
+      /* ignore */
+    }
+
+    setDictation((prev) => {
+      if (!prev || prev.complete || prev.result) return prev;
+      if (prev.currentIdx !== gradeIdx) return prev;
+      const mastered = [...prev.mastered];
+      mastered[gradeIdx] = true;
+      const allDone = mastered.every(Boolean);
+      return {
+        ...prev,
+        mastered,
+        typed: "",
+        result: { kind: "correct", imageUrl, isFinal: allDone },
+        totalAttempts: prev.totalAttempts + 1,
+      };
+    });
+  }
+
+  /** After success/fail image: go to next word (TTS) or finish session. */
+  async function dictationContinueAfterResult() {
+    const d = dictationRef.current;
+    if (!d?.result || d.complete) return;
+
+    if (d.result.kind === "wrong") {
       const nextIdx = pickRandomUnmasteredAvoiding(d.mastered, d.currentIdx);
       const nextWord = d.words[nextIdx]!;
+      const playEpoch = bumpDictationPlayEpoch();
       setDictation({
         ...d,
         currentIdx: nextIdx,
-        feedback: { kind: "wrong", expected, written },
+        result: null,
         typed: "",
-        totalAttempts,
+        readyToType: false,
+        playEpoch,
       });
       try {
         await playTts(nextWord, "de", 0.78);
       } catch {
         /* ignore */
+      } finally {
+        setDictation((prev) =>
+          prev && prev.playEpoch === playEpoch ? { ...prev, readyToType: true } : prev,
+        );
       }
       return;
     }
 
-    const mastered = [...d.mastered];
-    mastered[d.currentIdx] = true;
-    const done = mastered.filter(Boolean).length;
-    const total = d.words.length;
-
-    if (done >= total) {
+    if (d.result.isFinal) {
       setDictation({
         ...d,
-        mastered,
-        typed: "",
-        feedback: { kind: "none" },
-        totalAttempts,
+        result: null,
         complete: true,
       });
       try {
@@ -308,26 +388,25 @@ export function QuestClient({
       return;
     }
 
-    const nextIdx = pickRandomUnmasteredIndex(mastered);
+    const nextIdx = pickRandomUnmasteredIndex(d.mastered);
     const nextWord = d.words[nextIdx]!;
+    const playEpoch = bumpDictationPlayEpoch();
     setDictation({
       ...d,
-      mastered,
       currentIdx: nextIdx,
+      result: null,
       typed: "",
-      feedback: { kind: "none" },
-      totalAttempts,
+      readyToType: false,
+      playEpoch,
     });
-
-    try {
-      await playDictationCorrectChime();
-    } catch {
-      /* ignore */
-    }
     try {
       await playTts(nextWord, "de", 0.78);
     } catch {
       /* ignore */
+    } finally {
+      setDictation((prev) =>
+        prev && prev.playEpoch === playEpoch ? { ...prev, readyToType: true } : prev,
+      );
     }
   }
 
@@ -340,17 +419,30 @@ export function QuestClient({
     }
     const currentIdx = Math.floor(Math.random() * words.length);
     const first = words[currentIdx]!;
+    const playEpoch = bumpDictationPlayEpoch();
+    queueMicrotask(() => {
+      void (async () => {
+        try {
+          await playTts(first, "de", 0.78);
+        } catch {
+          /* ignore */
+        } finally {
+          setDictation((prev) =>
+            prev && prev.playEpoch === playEpoch ? { ...prev, readyToType: true } : prev,
+          );
+        }
+      })();
+    });
     setDictation({
       words,
       mastered: words.map(() => false),
       currentIdx,
       typed: "",
-      feedback: { kind: "none" },
+      result: null,
       totalAttempts: 0,
       complete: false,
-    });
-    queueMicrotask(() => {
-      void playTts(first, "de", 0.78);
+      readyToType: false,
+      playEpoch,
     });
   }
 
@@ -1039,10 +1131,6 @@ export function QuestClient({
       {step === "a_upload" ? (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Type the homework text</h2>
-          <p className="mt-2 text-sm text-white/90">
-            We removed the homework-photo scan (it was too unreliable). Type the German text here
-            exactly as the teacher wrote it (umlauts, ß, and capitals).
-          </p>
 
           <label className="mt-4 block text-sm font-bold text-white/90">Title (optional)</label>
           <input
@@ -1091,12 +1179,6 @@ export function QuestClient({
       {step === "b_notebook" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Notebook copy</h2>
-          <p className="mt-2 text-sm leading-relaxed">
-            Copy the German text into your notebook. Take 1–2 photos and tap <strong>Check notebook</strong>.
-            Every check shows your photo and what was read vs what it should be, plus green/red per word.
-            Photos stay on this device for about <strong>two days</strong>, then they are removed automatically
-            (we do not keep a long history of pictures).
-          </p>
           <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
             <input
               type="file"
@@ -1140,9 +1222,6 @@ export function QuestClient({
             <div ref={notebookFeedbackRef} className="mt-6 scroll-mt-24 space-y-6 border-t-2 border-white/20 pt-4">
               <div>
                 <p className="font-bold text-[#f4d03f]">Your notebook checks</p>
-                <p className="mt-1 text-xs text-white/75">
-                  Each upload gets its own feedback. You can take another photo and check again anytime.
-                </p>
               </div>
               {notebookAttempts.map((attempt, idx) => (
                 <div
@@ -1201,9 +1280,6 @@ export function QuestClient({
           ) : handwriting ? (
             <div className="mt-6 border-t-2 border-white/20 pt-4">
               <p className="font-bold text-[#f4d03f]">Last saved check</p>
-              <p className="mt-1 text-xs text-white/75">
-                Add a new photo to see it here with your picture. Older sessions may not have stored images.
-              </p>
               <p className="mt-3 text-sm text-white/90">{handwriting.summary}</p>
               {notebookWordTiles(handwriting)}
             </div>
@@ -1224,7 +1300,7 @@ export function QuestClient({
       {/* c */}
       {step === "c_guide" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">What to do</h2>
+          <h2 className="text-xl font-black">Task</h2>
           {extracted.main_task_summary_en ? (
             <p className="mt-3 rounded-lg bg-black/25 p-3 text-base font-semibold leading-relaxed">
               {extracted.main_task_summary_en}
@@ -1254,11 +1330,6 @@ export function QuestClient({
       {step === "e_read_aloud" && extracted && readSents.length > 0 && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Listen</h2>
-          <p className="mt-2 text-sm text-white/90">
-            The whole passage is below. <strong>Tap a sentence</strong> to choose what plays.{" "}
-            <strong>Press a word</strong> in that sentence to hear it and see a short English meaning
-            (release to hide).
-          </p>
           <div
             ref={readListRef}
             className="mt-3 max-h-[min(28rem,55vh)] overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-2 text-sm leading-relaxed"
@@ -1284,9 +1355,6 @@ export function QuestClient({
               </div>
             ))}
           </div>
-          <p className="mt-3 text-xs text-white/70">
-            The yellow outline is the sentence that will play. Tap another line to switch.
-          </p>
 
           {listenTip ? (
             <div className="mt-3 rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-left shadow-lg">
@@ -1297,8 +1365,8 @@ export function QuestClient({
           ) : null}
 
           <p className="mt-4 rounded-lg bg-black/30 p-3 text-base leading-relaxed">
-            <span className="font-bold text-[#f4d03f]">English (this sentence): </span>
-            {readTrans[highlightSentence]?.trim() || "— (add a translation in homework settings later)"}
+            <span className="font-bold text-[#f4d03f]">EN: </span>
+            {readTrans[highlightSentence]?.trim() || "—"}
           </p>
           <p className="mt-3 text-sm font-bold text-white/80">Speaking speed</p>
           <input
@@ -1351,9 +1419,6 @@ export function QuestClient({
       {step === "f_user_read" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">You read</h2>
-          <p className="mt-2 text-sm">
-            Move sentence by sentence. Tap words to hear them again if a sound is tricky.
-          </p>
           {sentencesFromExtracted(extracted).length > 1 ? (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
@@ -1392,11 +1457,7 @@ export function QuestClient({
 
           <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/20 p-3">
             <p className="text-sm font-bold text-[#f4d03f]">Listening check (microphone)</p>
-            <p className="mt-1 text-xs text-white/80">
-              Tap <strong>Start</strong>, read the sentence out loud, then we mark each word. The browser
-              must allow <strong>microphone</strong> for this site. If you see an error about “not
-              allowed”, open site settings and enable the mic, or use Chrome on phone/desktop.
-            </p>
+            <p className="mt-1 text-xs text-white/80">Allow the mic when asked.</p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               {listenState.kind !== "listening" ? (
                 <button
@@ -1429,7 +1490,7 @@ export function QuestClient({
 
             {listenState.kind === "listening" ? (
               <p className="mt-3 rounded-lg bg-[#f4d03f]/15 p-3 text-sm font-bold">
-                Listening… read now (sentence is highlighted below)
+                Listening…
               </p>
             ) : null}
             {listenState.kind === "error" ? (
@@ -1522,20 +1583,9 @@ export function QuestClient({
       {/* g — dictation */}
       {step === "g_dictation" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
-          <h2 className="text-xl font-black">Dictation (type what you hear)</h2>
-          <p className="mt-2 text-sm text-white/90">
-            The computer picks a <strong>random word</strong> and <strong>reads it aloud</strong> (you can use{" "}
-            <strong>Hear again</strong> if needed). Type what you hear and tap <strong>Check</strong>. When it’s
-            right, you’ll hear a <strong>little celebration sound</strong>, then the <strong>next word</strong> is
-            spoken automatically — we don’t show the answer. If it’s wrong, you’ll see what you wrote vs the
-            correct spelling for that try, then we <strong>move on</strong> to another word (the new word plays
-            aloud). Words you miss stay in the pool until you spell them correctly later. Progress is{" "}
-            <strong>100%</strong> when every word has been spelled correctly once.
-          </p>
+          <h2 className="text-xl font-black">Dictation</h2>
 
-          {!dictation || dictation.words.length === 0 ? (
-            <p className="mt-4 text-sm text-amber-200">Add German text in the first step — no words to dictate.</p>
-          ) : (
+          {dictation && dictation.words.length > 0 ? (
             <div className="mt-4 space-y-4">
               {(() => {
                 const d = dictation;
@@ -1563,7 +1613,6 @@ export function QuestClient({
                     {d.complete ? (
                       <div className="rounded-xl border-4 border-[#f4d03f] bg-[#1a472a] p-4 text-center">
                         <p className="text-xl font-black text-[#f4d03f]">100% — all words correct!</p>
-                        <p className="mt-2 text-sm text-white/90">Great job. Continue when you’re ready.</p>
                         <div className="mt-4 aspect-video w-full overflow-hidden rounded-lg">
                           <iframe
                             className="h-full w-full"
@@ -1574,19 +1623,56 @@ export function QuestClient({
                           />
                         </div>
                       </div>
+                    ) : d.result ? (
+                      <div className="rounded-xl border-2 border-white/25 bg-black/25 p-4 text-center">
+                        <img
+                          src={d.result.imageUrl}
+                          alt=""
+                          className="mx-auto max-h-[min(40vh,280px)] w-auto rounded-lg object-contain shadow-lg"
+                        />
+                        {d.result.kind === "wrong" ? (
+                          <div className="mt-4 rounded-lg border border-red-400/40 bg-red-900/25 p-3 text-left text-sm">
+                            <p className="font-black text-lg">Not quite</p>
+                            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                              <div className="rounded-lg bg-black/25 p-2">
+                                <p className="text-xs font-bold uppercase text-white/60">You wrote</p>
+                                <p className="text-lg font-bold text-white">
+                                  {d.result.written ? `"${d.result.written}"` : "(empty)"}
+                                </p>
+                              </div>
+                              <div className="rounded-lg bg-black/25 p-2">
+                                <p className="text-xs font-bold uppercase text-[#f4d03f]">Correct</p>
+                                <p className="text-lg font-bold text-[#f4d03f]">{d.result.expected}</p>
+                              </div>
+                            </div>
+                            <p className="mt-3 text-sm text-white/90">
+                              {dictationHint(d.result.expected, d.result.written)}
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-lg font-bold text-[#f4d03f]">
+                            {d.result.isFinal ? "You finished every word!" : "Correct!"}
+                          </p>
+                        )}
+                        <button
+                          type="button"
+                          className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                          onClick={() => void dictationContinueAfterResult()}
+                        >
+                          {d.result.kind === "correct" && d.result.isFinal ?
+                            "Continue"
+                          : "Next"}
+                        </button>
+                      </div>
                     ) : (
                       <>
-                        <p className="text-xs text-white/75">
-                          The word plays automatically. Use <strong>Hear again</strong> only if you need a
-                          repeat.
-                        </p>
                         <button
                           type="button"
                           className="w-full rounded-xl border-2 border-white/35 bg-white/10 py-2.5 text-sm font-bold"
                           onClick={() => {
                             void playTts(target, "de", 0.78);
                           }}
-                          disabled={!target}
+                          disabled={!target || !d.readyToType}
                         >
                           🔊 Hear again (slow)
                         </button>
@@ -1596,46 +1682,21 @@ export function QuestClient({
                           onChange={(e) =>
                             setDictation((prev) => (prev ? { ...prev, typed: e.target.value } : prev))
                           }
-                          placeholder="Type the word…"
-                          className="w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
+                          placeholder={d.readyToType ? "Type the word…" : "Listen…"}
+                          className="w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black disabled:opacity-60"
                           autoCapitalize="off"
                           autoCorrect="off"
-                          disabled={d.complete}
+                          disabled={!d.readyToType}
                         />
 
                         <button
                           type="button"
-                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18] disabled:opacity-50"
                           onClick={() => void submitDictation()}
-                          disabled={!target || d.complete}
+                          disabled={!target || !d.readyToType}
                         >
                           Check
                         </button>
-
-                        {d.feedback.kind === "wrong" ? (
-                          <div className="rounded-xl border-2 border-red-400 bg-red-900/30 p-4 text-left">
-                            <p className="font-black text-lg">Not quite — that word will come back later</p>
-                            <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
-                              <div className="rounded-lg bg-black/25 p-2">
-                                <p className="text-xs font-bold uppercase text-white/60">You wrote</p>
-                                <p className="text-lg font-bold text-white">
-                                  {d.feedback.written ? `"${d.feedback.written}"` : "(empty)"}
-                                </p>
-                              </div>
-                              <div className="rounded-lg bg-black/25 p-2">
-                                <p className="text-xs font-bold uppercase text-[#f4d03f]">Should be</p>
-                                <p className="text-lg font-bold text-[#f4d03f]">{d.feedback.expected}</p>
-                              </div>
-                            </div>
-                            <p className="mt-3 text-sm text-white/90">
-                              {dictationHint(d.feedback.expected, d.feedback.written)}
-                            </p>
-                            <p className="mt-3 text-sm font-semibold text-[#f4d03f]">
-                              The <strong>next word</strong> was just read aloud — type what you hear for that
-                              word (use Hear again if you need a repeat).
-                            </p>
-                          </div>
-                        ) : null}
                       </>
                     )}
 
@@ -1650,7 +1711,7 @@ export function QuestClient({
                 );
               })()}
             </div>
-          )}
+          ) : null}
 
           <button
             type="button"
@@ -1667,29 +1728,10 @@ export function QuestClient({
       {step === "g_repeat_spelling" && extracted && (
         <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
           <h2 className="text-xl font-black">Practice & spelling</h2>
-          <div className="mt-3 rounded-lg border-2 border-white/20 bg-black/20 p-3 text-sm leading-relaxed">
-            <p className="font-bold text-[#f4d03f]">How you felt reading each word (honest is OK!)</p>
-            <ul className="mt-2 list-disc pl-5 space-y-1">
-              <li>
-                <span className="inline-block h-3 w-3 rounded bg-green-500 align-middle" />{" "}
-                <strong>Green</strong> — sounded perfect
-              </li>
-              <li>
-                <span className="inline-block h-3 w-3 rounded bg-blue-600 align-middle" />{" "}
-                <strong>Blue</strong> — almost right (small slip)
-              </li>
-              <li>
-                <span className="inline-block h-3 w-3 rounded bg-red-600 align-middle" />{" "}
-                <strong>Red</strong> — needs more practice
-              </li>
-            </ul>
-            <p className="mt-2 text-xs text-white/75">
-              Then play the spelling game: hear the word, type it in German (capital letters for
-              nouns).
-            </p>
-          </div>
-          <p className="mt-4 text-sm">
-            Tap a color under each word. When ready, start the spelling game.
+          <p className="mt-3 text-xs text-white/75">
+            <span className="inline-block h-2 w-2 rounded bg-green-500 align-middle" /> OK ·{" "}
+            <span className="inline-block h-2 w-2 rounded bg-blue-600 align-middle" /> Almost ·{" "}
+            <span className="inline-block h-2 w-2 rounded bg-red-600 align-middle" /> Hard — then spelling.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             {words.map(({ w, i }) => {
@@ -1727,7 +1769,6 @@ export function QuestClient({
                 </button>
               ) : (
                 <>
-                  <p className="mt-2 text-sm">Type what you hear (nouns capitalized).</p>
                   <button
                     type="button"
                     className="mt-3 w-full rounded-lg bg-white/10 py-3 font-bold"

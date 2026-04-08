@@ -121,7 +121,7 @@ export function GermanWordBlock({
 
         {showSentenceEnglish && sentenceEn ? (
           <p className="mt-3 rounded-lg bg-black/25 p-3 text-sm leading-relaxed text-white/95">
-            <span className="font-bold text-[#f4d03f]">This sentence in English: </span>
+            <span className="font-bold text-[#f4d03f]">EN: </span>
             {sentenceEn}
           </p>
         ) : null}
@@ -158,7 +158,7 @@ export function GermanWordBlock({
 
       {showSentenceEnglish && sentenceEn ? (
         <p className="mt-3 rounded-lg bg-black/25 p-3 text-sm leading-relaxed text-white/95">
-          <span className="font-bold text-[#f4d03f]">This sentence in English: </span>
+          <span className="font-bold text-[#f4d03f]">EN: </span>
           {sentenceEn}
         </p>
       ) : null}
