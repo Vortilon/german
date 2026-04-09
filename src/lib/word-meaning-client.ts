@@ -1,4 +1,4 @@
-/** Client-side word meaning: glossary first, then /api/dict with in-memory cache. */
+/** Client-side word meaning: glossary first, then free translate with cache. */
 export function makeMeaningCache() {
   return new Map<string, string>();
 }
@@ -15,14 +15,14 @@ export async function fetchWordMeaning(
   const hit = cache.get(lower);
   if (hit) return hit;
   try {
-    const res = await fetch("/api/dict", {
+    const res = await fetch("/api/translate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ word, sentence }),
+      body: JSON.stringify({ text: word, source: "de", target: "en" }),
     });
     const json = (await res.json()) as {
       ok?: boolean;
-      en?: string;
+      text?: string;
       error?: string;
     };
     if (!res.ok) {
@@ -30,9 +30,9 @@ export async function fetchWordMeaning(
       cache.set(lower, `— (${msg})`);
       return cache.get(lower)!;
     }
-    const en = json.ok && json.en?.trim() ? json.en.trim() : "— (no definition)";
-    cache.set(lower, en);
-    return en;
+    const out = json.ok && json.text?.trim() ? json.text.trim() : "—";
+    cache.set(lower, out);
+    return out;
   } catch {
     return "— (offline)";
   }

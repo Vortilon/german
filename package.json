@@ -8,7 +8,9 @@
     "start": "next start",
     "start:proxy": "node server/realtime-proxy.mjs",
     "lint": "eslint",
-    "generate:rewards": "node scripts/generate-reward-images.mjs"
+    "generate:rewards": "node scripts/generate-reward-images.mjs",
+    "generate:rewards:batch2": "node scripts/reward-images/emit-batch2-prompts.mjs && node scripts/generate-reward-images.mjs scripts/reward-images/prompts-batch2.json",
+    "generate:rewards:batch3-success": "node scripts/reward-images/emit-batch3-success-prompts.mjs && node scripts/generate-reward-images.mjs scripts/reward-images/prompts-batch3-success.json"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.0",

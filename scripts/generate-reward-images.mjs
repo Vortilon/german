@@ -4,22 +4,27 @@
  * Docs: https://docs.x.ai/docs/guides/image-generation (POST /v1/images/edits)
  *
  * Usage:
- *   textXAI_API_KEY=... node scripts/generate-reward-images.mjs
+ *   npm run generate:rewards
+ *   node scripts/generate-reward-images.mjs [path/to/prompts.json]
  *
- * Requires: scripts/reward-images/reference.png and scripts/reward-images/prompts.json
+ * Continues numbering after existing files in public/rewards/{success,fail}/.
+ * Merges paths into src/lib/reward-manifest.json (keeps prior entries).
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const REF_PATH = join(__dirname, "reward-images", "reference.png");
-const PROMPTS_PATH = join(__dirname, "reward-images", "prompts.json");
+const DEFAULT_PROMPTS = join(__dirname, "reward-images", "prompts.json");
 const OUT_SUCCESS = join(ROOT, "public", "rewards", "success");
 const OUT_FAIL = join(ROOT, "public", "rewards", "fail");
 const MANIFEST_PATH = join(ROOT, "src", "lib", "reward-manifest.json");
+
+const PROMPT_SUFFIX =
+  ", exactly matching the reference character in face, hair, clothing, eyes, body shape and cartoon style, white background";
 
 const MODEL = "grok-imagine-image";
 const API = "https://api.x.ai/v1/images/edits";
@@ -75,6 +80,56 @@ function extFromMime(mime) {
   return "png";
 }
 
+function maxRewardIndex(dir, kind) {
+  if (!existsSync(dir)) return 0;
+  const re = new RegExp(`^${kind}-(\\d+)\\.(jpg|jpeg|png|webp)$`, "i");
+  let max = 0;
+  for (const name of readdirSync(dir)) {
+    const m = name.match(re);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return max;
+}
+
+function padIndex(n) {
+  return String(n).padStart(n >= 100 ? 3 : 2, "0");
+}
+
+function finalizePrompt(raw) {
+  const p = String(raw || "").trim();
+  if (!p) return "";
+  if (p.includes("exactly matching the reference character")) return p;
+  return p + PROMPT_SUFFIX;
+}
+
+function loadManifest() {
+  try {
+    const cur = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+    return {
+      success: [...(cur.success || [])],
+      fail: [...(cur.fail || [])],
+    };
+  } catch {
+    return { success: [], fail: [] };
+  }
+}
+
+function saveManifest(manifest) {
+  writeFileSync(
+    MANIFEST_PATH,
+    JSON.stringify(
+      {
+        success: manifest.success,
+        fail: manifest.fail,
+        generatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
 async function editImage({ apiKey, referenceDataUrl, prompt, attempt = 0 }) {
   const res = await fetch(API, {
     method: "POST",
@@ -126,13 +181,16 @@ async function main() {
   loadEnvFiles();
   const apiKey = getApiKey();
 
+  const arg = process.argv[2];
+  const promptsPath = arg ? (isAbsolute(arg) ? arg : join(ROOT, arg)) : DEFAULT_PROMPTS;
+
   const refBuf = readFileSync(REF_PATH);
   const refB64 = refBuf.toString("base64");
   const referenceDataUrl = `data:image/png;base64,${refB64}`;
 
-  const prompts = JSON.parse(readFileSync(PROMPTS_PATH, "utf8"));
+  const prompts = JSON.parse(readFileSync(promptsPath, "utf8"));
   if (!Array.isArray(prompts) || !prompts.length) {
-    console.error("prompts.json must be a non-empty array.");
+    console.error("prompts file must be a non-empty array.");
     process.exit(1);
   }
 
@@ -140,18 +198,19 @@ async function main() {
   mkdirSync(OUT_FAIL, { recursive: true });
   mkdirSync(dirname(MANIFEST_PATH), { recursive: true });
 
-  const counters = { success: 0, fail: 0 };
-  const manifest = { success: [], fail: [] };
+  let nextSuccess = maxRewardIndex(OUT_SUCCESS, "success");
+  let nextFail = maxRewardIndex(OUT_FAIL, "fail");
+  const manifest = loadManifest();
 
   let i = 0;
   for (const row of prompts) {
     const kind = row.kind === "fail" ? "fail" : "success";
-    const prompt = String(row.prompt || "").trim();
+    const promptRaw = String(row.prompt || "").trim();
+    const prompt = finalizePrompt(promptRaw);
     if (!prompt) continue;
 
-    counters[kind] += 1;
-    const n = counters[kind];
-    const baseName = `${kind}-${String(n).padStart(2, "0")}`;
+    const n = kind === "success" ? ++nextSuccess : ++nextFail;
+    const baseName = `${kind}-${padIndex(n)}`;
 
     const subtitle = row.title ? ` — ${row.title}` : "";
     console.log(`[${++i}/${prompts.length}] ${kind} #${n}${subtitle}…`);
@@ -161,25 +220,13 @@ async function main() {
     const outPath = join(ROOT, "public", rel.slice(1));
     writeFileSync(outPath, buffer);
     manifest[kind].push(rel);
+    saveManifest(manifest);
     console.log(`  saved ${rel}`);
 
     if (i < prompts.length) await sleep(DELAY_MS);
   }
 
-  writeFileSync(
-    MANIFEST_PATH,
-    JSON.stringify(
-      {
-        success: manifest.success,
-        fail: manifest.fail,
-        generatedAt: new Date().toISOString(),
-      },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
-  );
-  console.log(`Wrote ${MANIFEST_PATH}`);
+  console.log(`Manifest updated at ${MANIFEST_PATH}`);
   console.log("Done.");
 }
 

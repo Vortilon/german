@@ -32,9 +32,11 @@ import { playDictationCompleteFanfare, playDictationCorrectChime } from "@/lib/r
 import rewardManifest from "@/lib/reward-manifest.json";
 import { pickRewardImageUrl } from "@/lib/reward-feedback-images";
 import { playTts } from "@/lib/play-tts";
+import { fetchHomeworkAssignment, fetchHomeworkWeeksIndex, fetchStudentWeek, upsertStudentWeek } from "@/lib/homework-weekly";
 import {
   sentenceEnglishLines,
   sentencesFromExtracted,
+  segmentWords,
   tokenizeWords,
 } from "@/lib/tokenize";
 import { compressImageToJpegDataUrl } from "@/lib/compress-image-client";
@@ -77,7 +79,9 @@ export function QuestClient({
   user: User;
   persistence: AppPersistence;
 }) {
-  const weekStart = useMemo(() => getWeekStartIso(), []);
+  const currentWeekStart = useMemo(() => getWeekStartIso(), []);
+  const [weekStart, setWeekStart] = useState(currentWeekStart);
+  const [weeksIndex, setWeeksIndex] = useState<Array<{ week_start: string; title: string }>>([]);
   const notebookAttemptsKey = useMemo(
     () => notebookAttemptsStorageKey(user.id, weekStart),
     [user.id, weekStart],
@@ -114,6 +118,8 @@ export function QuestClient({
     extracted?.special_words.forEach((x) => m.set(x.de.toLowerCase(), x.en));
     return m;
   }, [extracted?.special_words]);
+
+  // Translation preload lives near `persist` (below) so TS doesn't complain about use-before-declaration.
 
   const onListenWordDown = useCallback(
     async (word: string, sentence: string) => {
@@ -164,6 +170,8 @@ export function QuestClient({
     mastered: boolean[];
     currentIdx: number;
     typed: string;
+    /** If true, capitalization can be ignored (sentence-start non-nouns). */
+    allowCaseFoldAtIdx: boolean[];
     /** After Check: show image + Next before the next listen/type round. */
     result:
       | null
@@ -183,6 +191,7 @@ export function QuestClient({
   }
   const dictationRef = useRef(dictation);
   dictationRef.current = dictation;
+  const dictationInputRef = useRef<HTMLInputElement | null>(null);
 
   const DICTATION_VIDEO_URL = "https://www.youtube.com/embed/dQw4w9WgXcQ";
 
@@ -235,6 +244,7 @@ export function QuestClient({
         mastered: words.map(() => false),
         currentIdx,
         typed: "",
+        allowCaseFoldAtIdx: computeDictationCaseFoldFlags(extracted),
         result: null,
         totalAttempts: 0,
         complete: false,
@@ -243,6 +253,34 @@ export function QuestClient({
       };
     });
   }, [progress.step, extracted]);
+
+  function computeDictationCaseFoldFlags(ex: ExtractedHomework): boolean[] {
+    // Determine sentence starts from the *raw* stream (keeps punctuation), then map 1:1 to tokenized words.
+    const segs = segmentWords(ex.full_german_text);
+    const words = segs.map((s) => s.w);
+    const sentenceStartAt: boolean[] = [];
+    for (let i = 0; i < segs.length; i++) {
+      const prevRaw = segs[i - 1]?.raw ?? "";
+      const isStart = i === 0 || /[.!?]$/.test(prevRaw);
+      sentenceStartAt.push(isStart);
+    }
+
+    // If a word ever appears capitalized mid-sentence, assume noun/proper noun → require capitalization.
+    const capMidSentence = new Set<string>();
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i] || "";
+      const lower = w.toLowerCase();
+      const isCap = /^[A-ZÄÖÜ]/.test(w);
+      if (!sentenceStartAt[i] && isCap) capMidSentence.add(lower);
+    }
+
+    // Case folding is allowed only for sentence-start words that are not "noun-likely" by the rule above.
+    return words.map((w, i) => {
+      const lower = w.toLowerCase();
+      const isCap = /^[A-ZÄÖÜ]/.test(w);
+      return Boolean(sentenceStartAt[i] && isCap && !capMidSentence.has(lower));
+    });
+  }
 
   function pickRandomUnmasteredIndex(mastered: boolean[]): number {
     const pool: number[] = [];
@@ -268,9 +306,9 @@ export function QuestClient({
     return use[Math.floor(Math.random() * use.length)]!;
   }
 
-  function dictationHint(expected: string, written: string): string {
+  function dictationHint(expected: string, written: string, allowCaseFold: boolean): string {
     const hints: string[] = [];
-    if (expected !== written && expected.toLowerCase() === written.toLowerCase()) {
+    if (!allowCaseFold && expected !== written && expected.toLowerCase() === written.toLowerCase()) {
       hints.push("Check capital letters — German nouns start with a capital letter.");
     }
     if (expected.length !== written.length) {
@@ -292,7 +330,10 @@ export function QuestClient({
     const gradeIdx = d.currentIdx;
     const expected = d.words[gradeIdx]!;
     const written = d.typed.trim();
-    const ok = normalizeDictationWord(written) === normalizeDictationWord(expected);
+    const nW = normalizeDictationWord(written);
+    const nE = normalizeDictationWord(expected);
+    const ok =
+      nW === nE || (d.allowCaseFoldAtIdx[gradeIdx] && nW.toLowerCase() === nE.toLowerCase());
 
     if (!ok) {
       let imageUrl = "/rewards/fail/fail-01.jpg";
@@ -438,6 +479,7 @@ export function QuestClient({
       mastered: words.map(() => false),
       currentIdx,
       typed: "",
+      allowCaseFoldAtIdx: computeDictationCaseFoldFlags(extracted),
       result: null,
       totalAttempts: 0,
       complete: false,
@@ -445,6 +487,15 @@ export function QuestClient({
       playEpoch,
     });
   }
+
+  useEffect(() => {
+    if (progress.step !== "g_dictation") return;
+    const d = dictation;
+    if (!d) return;
+    if (d.complete || d.result) return;
+    if (!d.readyToType) return;
+    queueMicrotask(() => dictationInputRef.current?.focus());
+  }, [progress.step, dictation?.readyToType, dictation?.result, dictation?.complete]);
 
   /** Typed dictation: same punctuation rules as tokenizeWords; case must match (German nouns). */
   function normalizeDictationWord(w: string) {
@@ -585,11 +636,9 @@ export function QuestClient({
         return;
       }
       if (!supabase) return;
-      await upsertHomeworkWeek(supabase, {
+      await upsertStudentWeek(supabase, {
         user_id: user.id,
         week_start: weekStart,
-        topic: ex?.title ?? null,
-        extracted: ex,
         progress: pr,
         handwriting: hw,
         parent_report: rep,
@@ -606,6 +655,91 @@ export function QuestClient({
       parentReport,
     ],
   );
+
+  // Preload free translations once per homework (sentence + words), then persist into `extracted`.
+  useEffect(() => {
+    if (!extracted) return;
+    if (useLocal) return;
+    const hasSentenceEn = (extracted.sentence_translations_en || []).some((x) => (x || "").trim());
+    const hasWordEn = (extracted.special_words || []).some((x) => (x.en || "").trim());
+    if (hasSentenceEn && hasWordEn) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const sentences = sentencesFromExtracted(extracted);
+        const uniq = Array.from(
+          new Set(tokenizeWords(extracted.full_german_text).map((t) => t.w.toLowerCase())),
+        ).slice(0, 140);
+
+        async function translate(text: string) {
+          const k = `mm:de|en:${text}`;
+          try {
+            const hit = sessionStorage.getItem(k);
+            if (hit) return hit;
+          } catch {
+            /* ignore */
+          }
+          const res = await fetch("/api/translate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, source: "de", target: "en" }),
+          });
+          const json = (await res.json()) as { ok?: boolean; text?: string };
+          const out = res.ok && json.ok && json.text ? String(json.text) : "";
+          try {
+            if (out) sessionStorage.setItem(k, out);
+          } catch {
+            /* ignore */
+          }
+          return out;
+        }
+
+        async function runLimited<T>(
+          items: T[],
+          worker: (item: T, idx: number) => Promise<void>,
+          concurrency = 4,
+        ) {
+          const q = items.map((it, idx) => ({ it, idx }));
+          const runners = Array.from({ length: Math.min(concurrency, q.length) }, async () => {
+            while (q.length) {
+              const row = q.shift();
+              if (!row) break;
+              await worker(row.it, row.idx);
+            }
+          });
+          await Promise.all(runners);
+        }
+
+        const sentenceEn: string[] = Array(sentences.length).fill("");
+        await runLimited(sentences, async (s, idx) => {
+          const out = await translate(s);
+          if (out) sentenceEn[idx] = out;
+        });
+
+        const wordPairs: Array<{ de: string; en: string }> = [];
+        await runLimited(uniq, async (lower) => {
+          const out = await translate(lower);
+          if (out) wordPairs.push({ de: lower, en: out });
+        });
+
+        if (cancelled) return;
+        const nextEx: ExtractedHomework = {
+          ...extracted,
+          sentence_translations_en: sentenceEn,
+          special_words: wordPairs.length ? wordPairs : extracted.special_words,
+        };
+        setExtracted(nextEx);
+        void persist({ extracted: nextEx });
+      } catch {
+        /* ignore */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [extracted, useLocal, persist]);
 
   useEffect(() => {
     (async () => {
@@ -647,10 +781,15 @@ export function QuestClient({
         return;
       }
       try {
-        const row = await fetchHomeworkWeek(supabase, user.id, weekStart);
-        if (row?.extracted) setExtracted(row.extracted);
-        if (row?.progress) {
-          const rp = row.progress as HomeworkProgress;
+        const [idx, assignment, student] = await Promise.all([
+          fetchHomeworkWeeksIndex(supabase),
+          fetchHomeworkAssignment(supabase, weekStart),
+          fetchStudentWeek(supabase, user.id, weekStart),
+        ]);
+        setWeeksIndex(idx.map((x) => ({ week_start: x.week_start, title: x.title })));
+        if (assignment?.extracted) setExtracted(assignment.extracted);
+        if (student?.progress) {
+          const rp = student.progress as HomeworkProgress;
           const migratedStep = migrateProgressStep(String(rp.step));
           const maxIdx = QUEST_STEP_ORDER.length - 1;
           setProgress({
@@ -662,8 +801,8 @@ export function QuestClient({
             ),
           });
         }
-        if (row?.handwriting) setHandwriting(row.handwriting);
-        if (row?.parent_report) setParentReport(row.parent_report as ParentReport);
+        if (student?.handwriting) setHandwriting(student.handwriting);
+        if (student?.parent_report) setParentReport(student.parent_report as ParentReport);
       } catch (e) {
         setErr(e instanceof Error ? e.message : "Load failed");
       } finally {
@@ -1079,6 +1218,27 @@ export function QuestClient({
             </button>
           </div>
         </div>
+
+        {!useLocal && weeksIndex.length > 0 ? (
+          <div className="mt-3">
+            <label className="text-xs font-bold text-white/70">Week</label>
+            <select
+              value={weekStart}
+              onChange={(e) => setWeekStart(e.target.value)}
+              className="mt-1 w-full rounded-lg border-2 border-[#2d1f18] bg-white/10 px-3 py-2 text-sm font-bold text-white"
+            >
+              {weeksIndex.map((w) => (
+                <option key={w.week_start} value={w.week_start}>
+                  {w.week_start} — {w.title}
+                </option>
+              ))}
+              {/* Ensure current week is reachable even before an assignment exists */}
+              {!weeksIndex.some((w) => w.week_start === currentWeekStart) ? (
+                <option value={currentWeekStart}>{currentWeekStart} — (no homework yet)</option>
+              ) : null}
+            </select>
+          </div>
+        ) : null}
 
         <nav
           className="mt-3 flex flex-wrap gap-2"
@@ -1646,7 +1806,11 @@ export function QuestClient({
                               </div>
                             </div>
                             <p className="mt-3 text-sm text-white/90">
-                              {dictationHint(d.result.expected, d.result.written)}
+                              {dictationHint(
+                                d.result.expected,
+                                d.result.written,
+                                Boolean(d.allowCaseFoldAtIdx[d.currentIdx]),
+                              )}
                             </p>
                           </div>
                         ) : (
@@ -1670,7 +1834,15 @@ export function QuestClient({
                           type="button"
                           className="w-full rounded-xl border-2 border-white/35 bg-white/10 py-2.5 text-sm font-bold"
                           onClick={() => {
-                            void playTts(target, "de", 0.78);
+                            void (async () => {
+                              try {
+                                await playTts(target, "de", 0.78);
+                              } catch {
+                                /* ignore */
+                              } finally {
+                                dictationInputRef.current?.focus();
+                              }
+                            })();
                           }}
                           disabled={!target || !d.readyToType}
                         >
@@ -1678,6 +1850,7 @@ export function QuestClient({
                         </button>
 
                         <input
+                          ref={dictationInputRef}
                           value={d.typed}
                           onChange={(e) =>
                             setDictation((prev) => (prev ? { ...prev, typed: e.target.value } : prev))
@@ -1687,6 +1860,12 @@ export function QuestClient({
                           autoCapitalize="off"
                           autoCorrect="off"
                           disabled={!d.readyToType}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void submitDictation();
+                            }
+                          }}
                         />
 
                         <button
