@@ -85,9 +85,12 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const elioOk = await verifyElioCookie(request);
+  const authenticated = !!user || elioOk;
+
   if (pathname === "/") {
     const home = request.nextUrl.clone();
-    home.pathname = user ? "/app" : "/login";
+    home.pathname = authenticated ? "/app" : "/login";
     return NextResponse.redirect(home);
   }
 
@@ -95,7 +98,7 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
-  if (!user) {
+  if (!authenticated) {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
     loginUrl.searchParams.set("next", pathname);
