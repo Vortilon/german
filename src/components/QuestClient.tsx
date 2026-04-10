@@ -39,6 +39,7 @@ import {
   segmentWords,
   tokenizeWords,
 } from "@/lib/tokenize";
+import { glossFromParallelSentences } from "@/lib/word-gloss";
 import { compressImageToJpegDataUrl } from "@/lib/compress-image-client";
 import {
   loadNotebookAttempts,
@@ -128,7 +129,7 @@ export function QuestClient({
   // Translation preload lives near `persist` (below) so TS doesn't complain about use-before-declaration.
 
   const onListenWordDown = useCallback(
-    async (word: string, sentence: string) => {
+    async (word: string, sentence: string, sentenceEn?: string) => {
       listenHoldRef.current = true;
       setListenTip({ word, text: "…" });
       try {
@@ -141,6 +142,7 @@ export function QuestClient({
         sentence,
         glossaryForListen,
         listenMeaningCacheRef.current,
+        sentenceEn,
       );
       if (listenHoldRef.current) setListenTip({ word, text });
     },
@@ -464,6 +466,8 @@ export function QuestClient({
       if (e.key !== "Enter" || e.repeat) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest?.("iframe")) return;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       e.preventDefault();
       void dictationContinueAfterResult();
     }
@@ -681,7 +685,8 @@ export function QuestClient({
     if (!extracted) return;
     const hasSentenceEn = (extracted.sentence_translations_en || []).some((x) => (x || "").trim());
     const hasWordEn = (extracted.special_words || []).some((x) => (x.en || "").trim());
-    if (hasSentenceEn && hasWordEn) return;
+    const hasAlignedGloss = Boolean(extracted.word_glossary_aligned_v2);
+    if (hasSentenceEn && hasWordEn && hasAlignedGloss) return;
 
     let cancelled = false;
     void (async () => {
@@ -738,8 +743,21 @@ export function QuestClient({
 
         const wordPairs: Array<{ de: string; en: string }> = [];
         await runLimited(uniq, async (lower) => {
-          const out = await translate(lower);
-          if (out) wordPairs.push({ de: lower, en: out });
+          const sentIdx = sentences.findIndex((s) =>
+            tokenizeWords(s).some((t) => t.w.toLowerCase() === lower),
+          );
+          const sDe = sentIdx >= 0 ? sentences[sentIdx]! : "";
+          const sEn = sentIdx >= 0 ? sentenceEn[sentIdx]?.trim() : "";
+          let en = "";
+          if (sDe && sEn) {
+            const g = glossFromParallelSentences(sDe, sEn, lower);
+            if (g) en = g;
+          }
+          if (!en) {
+            const out = await translate(lower);
+            if (out) en = out;
+          }
+          if (en) wordPairs.push({ de: lower, en });
         });
 
         if (cancelled) return;
@@ -747,6 +765,7 @@ export function QuestClient({
           ...extracted,
           sentence_translations_en: sentenceEn,
           special_words: wordPairs.length ? wordPairs : extracted.special_words,
+          word_glossary_aligned_v2: true,
         };
         setExtracted(nextEx);
         void persist({ extracted: nextEx });
@@ -1539,16 +1558,18 @@ export function QuestClient({
                 data-sent-idx={i}
                 role="presentation"
                 onClick={() => setHighlightSentence(i)}
-                className={`mb-2 w-full cursor-pointer rounded-lg px-2 py-2 text-left transition ${
+                className={`mb-2 w-full cursor-pointer rounded-lg px-2 py-2 text-left text-stone-900 transition ${
                   i === highlightSentence ?
-                    "bg-[#f4d03f]/25 ring-2 ring-[#f4d03f]"
-                  : "hover:bg-white/5"
+                    "bg-amber-100 ring-2 ring-amber-400/70"
+                  : "hover:bg-stone-100"
                 }`}
               >
                 <span className="mr-1 align-top font-bold text-stone-400">{i + 1}.</span>
                 <ListenInlineSentence
                   sentence={line}
-                  onWordPointerDown={(lemma) => void onListenWordDown(lemma, line)}
+                  onWordPointerDown={(lemma) =>
+                    void onListenWordDown(lemma, line, readTrans[i]?.trim())
+                  }
                   onWordPointerUp={onListenWordUp}
                 />
               </div>
@@ -1563,8 +1584,8 @@ export function QuestClient({
             </div>
           ) : null}
 
-          <p className="mt-4 rounded-lg bg-black/30 p-3 text-base leading-relaxed">
-            <span className="font-bold text-[#f4d03f]">EN: </span>
+          <p className="mt-4 rounded-lg border border-stone-200 bg-stone-50 p-3 text-base leading-relaxed text-stone-800">
+            <span className="font-bold text-amber-800">EN: </span>
             {readTrans[highlightSentence]?.trim() || "—"}
           </p>
           <p className="mt-3 text-sm font-bold text-stone-600">Speaking speed</p>
@@ -1902,6 +1923,7 @@ export function QuestClient({
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               e.preventDefault();
+                              e.stopPropagation();
                               void submitDictation();
                             }
                           }}

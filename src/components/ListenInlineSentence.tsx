@@ -16,13 +16,13 @@ type Props = {
 export function ListenInlineSentence({ sentence, onWordPointerDown, onWordPointerUp }: Props) {
   const segs = useMemo(() => segmentWords(sentence), [sentence]);
   return (
-    <span className="text-[15px] leading-relaxed text-white sm:text-base">
+    <span className="text-[15px] leading-relaxed text-stone-900 sm:text-base">
       {segs.map((seg, i) => (
         <span key={`${i}-${seg.raw}`}>
           {i > 0 ? " " : null}
           <button
             type="button"
-            className="inline cursor-pointer rounded-sm border-0 bg-transparent p-0 font-semibold text-white underline decoration-white/40 decoration-dotted underline-offset-[5px] hover:text-[#f4d03f] hover:decoration-[#f4d03f] active:opacity-90"
+            className="inline cursor-pointer rounded-sm border-0 bg-transparent p-0 font-semibold text-stone-900 underline decoration-stone-400 decoration-dotted underline-offset-[5px] hover:text-amber-800 hover:decoration-amber-700 active:opacity-90"
             onPointerDown={(e) => {
               e.stopPropagation();
               onWordPointerDown(seg.w);

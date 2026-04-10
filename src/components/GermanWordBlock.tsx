@@ -58,9 +58,9 @@ export function GermanWordBlock({
 
   const resolveMeaning = useCallback(
     async (w: string, sentence: string) => {
-      return fetchWordMeaning(w, sentence, meaningMap, cacheRef.current);
+      return fetchWordMeaning(w, sentence, meaningMap, cacheRef.current, sentenceEn || undefined);
     },
-    [meaningMap],
+    [meaningMap, sentenceEn],
   );
 
   const onWordDown = useCallback(
@@ -92,13 +92,13 @@ export function GermanWordBlock({
   if (layout === "inline") {
     return (
       <div className={className}>
-        <p className="text-lg leading-relaxed text-white">
+        <p className="text-lg leading-relaxed text-stone-900">
           {segs.map((seg, i) => (
             <span key={`${sentenceIndex ?? "all"}-${i}-${seg.raw}`}>
               {i > 0 ? " " : null}
               <button
                 type="button"
-                className="inline cursor-pointer rounded-sm border-0 bg-transparent p-0 font-semibold text-white underline decoration-white/40 decoration-dotted underline-offset-[5px] hover:text-[#f4d03f]"
+                className="inline cursor-pointer rounded-sm border-0 bg-transparent p-0 font-semibold text-stone-900 underline decoration-stone-400 decoration-dotted underline-offset-[5px] hover:text-amber-900"
                 onPointerDown={() => void onWordDown(seg.w)}
                 onPointerUp={onWordUp}
                 onPointerCancel={onWordUp}
@@ -111,17 +111,17 @@ export function GermanWordBlock({
         </p>
 
         {tapOpen ? (
-          <div className="mt-3 rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-left">
-            <p className="text-xs font-bold uppercase tracking-wide text-white/60">Meaning</p>
-            <p className="text-lg font-black text-[#f4d03f]">{tapWord ?? "—"}</p>
-            <p className="mt-1 text-sm text-white/90">{tapMeaning}</p>
-            <p className="mt-2 text-xs text-white/60">Release to hide.</p>
+          <div className="mt-3 rounded-xl border border-stone-300 bg-stone-100 p-3 text-left">
+            <p className="text-xs font-bold uppercase tracking-wide text-stone-600">Meaning</p>
+            <p className="text-lg font-black text-amber-900">{tapWord ?? "—"}</p>
+            <p className="mt-1 text-sm text-stone-800">{tapMeaning}</p>
+            <p className="mt-2 text-xs text-stone-500">Release to hide.</p>
           </div>
         ) : null}
 
         {showSentenceEnglish && sentenceEn ? (
-          <p className="mt-3 rounded-lg bg-black/25 p-3 text-sm leading-relaxed text-white/95">
-            <span className="font-bold text-[#f4d03f]">EN: </span>
+          <p className="mt-3 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-relaxed text-stone-800">
+            <span className="font-bold text-amber-800">EN: </span>
             {sentenceEn}
           </p>
         ) : null}
@@ -136,7 +136,7 @@ export function GermanWordBlock({
           <button
             key={`${sentenceIndex ?? "all"}-${i}-${w}`}
             type="button"
-            className="min-h-[44px] min-w-[44px] rounded-lg border-2 border-white/25 bg-black/15 px-2 py-2 text-xl font-bold transition active:scale-95"
+            className="min-h-[44px] min-w-[44px] rounded-lg border border-stone-300 bg-stone-100 px-2 py-2 text-xl font-bold text-stone-900 transition active:scale-95"
             onPointerDown={() => void onWordDown(w)}
             onPointerUp={onWordUp}
             onPointerCancel={onWordUp}
@@ -148,17 +148,17 @@ export function GermanWordBlock({
       </div>
 
       {tapOpen ? (
-        <div className="mt-3 rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-left">
-          <p className="text-xs font-bold uppercase tracking-wide text-white/60">Meaning</p>
-          <p className="text-lg font-black text-[#f4d03f]">{tapWord ?? "—"}</p>
-          <p className="mt-1 text-sm text-white/90">{tapMeaning}</p>
-          <p className="mt-2 text-xs text-white/60">Release to hide.</p>
+        <div className="mt-3 rounded-xl border border-stone-300 bg-stone-100 p-3 text-left">
+          <p className="text-xs font-bold uppercase tracking-wide text-stone-600">Meaning</p>
+          <p className="text-lg font-black text-amber-900">{tapWord ?? "—"}</p>
+          <p className="mt-1 text-sm text-stone-800">{tapMeaning}</p>
+          <p className="mt-2 text-xs text-stone-500">Release to hide.</p>
         </div>
       ) : null}
 
       {showSentenceEnglish && sentenceEn ? (
-        <p className="mt-3 rounded-lg bg-black/25 p-3 text-sm leading-relaxed text-white/95">
-          <span className="font-bold text-[#f4d03f]">EN: </span>
+        <p className="mt-3 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-relaxed text-stone-800">
+          <span className="font-bold text-amber-800">EN: </span>
           {sentenceEn}
         </p>
       ) : null}

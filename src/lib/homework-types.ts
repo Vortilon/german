@@ -34,6 +34,8 @@ export interface ExtractedHomework {
   lines: string[];
   /** One English translation per entry in `lines` (same order). */
   sentence_translations_en?: string[];
+  /** When true, `special_words` were built with sentence-aligned glosses (v2). */
+  word_glossary_aligned_v2?: boolean;
   /** Short English summary of what the teacher wants (copy, memorize, answer questions, etc.). */
   main_task_summary_en?: string;
 }
