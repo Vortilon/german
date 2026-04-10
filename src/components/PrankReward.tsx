@@ -26,7 +26,7 @@ export function PrankReward({ trigger }: { trigger: number }) {
   if (!text) return null;
 
   return (
-    <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 max-w-md -translate-x-1/2 animate-bounce rounded-2xl border-4 border-[#2d1f18] bg-[#f4d03f] px-4 py-3 text-center text-lg font-black text-[#2d1f18] shadow-[6px_6px_0_#2d1f18]">
+    <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 max-w-md -translate-x-1/2 animate-bounce rounded-xl border border-stone-300 bg-white px-4 py-3 text-center text-lg font-semibold text-stone-800 shadow-lg">
       {text}
     </div>
   );

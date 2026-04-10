@@ -63,41 +63,41 @@ export function LoginForm() {
   }
 
   return (
-    <div className="w-full max-w-md rounded-2xl border-4 border-[#5c4033] bg-[#3d8c40] p-6 shadow-[8px_8px_0_#2d1f18]">
-      <h1 className="text-center text-3xl font-black tracking-wide drop-shadow-sm">
+    <div className="w-full max-w-md rounded-2xl border border-stone-300 bg-white p-6 shadow-md">
+      <h1 className="text-center text-3xl font-black tracking-wide text-stone-900">
         Elio German
       </h1>
-      <p className="mt-2 text-center text-sm text-white/90">PrankMaster homework quest</p>
+      <p className="mt-2 text-center text-sm text-stone-600">PrankMaster homework quest</p>
 
       {hint ? (
-        <p className="mt-4 rounded-lg bg-black/20 p-3 text-sm">{hint}</p>
+        <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-stone-800">{hint}</p>
       ) : null}
 
       <form onSubmit={onSubmit} className="mt-6 flex flex-col gap-4">
-        <label className="flex flex-col gap-1 text-sm font-bold">
+        <label className="flex flex-col gap-1 text-sm font-bold text-stone-800">
           Username
           <input
-            className="rounded-lg border-2 border-[#2d1f18] bg-white px-4 py-3 text-lg text-black"
+            className="rounded-lg border border-stone-300 bg-white px-4 py-3 text-lg text-stone-900"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"
           />
         </label>
-        <label className="flex flex-col gap-1 text-sm font-bold">
+        <label className="flex flex-col gap-1 text-sm font-bold text-stone-800">
           Password
           <input
             type="password"
-            className="rounded-lg border-2 border-[#2d1f18] bg-white px-4 py-3 text-lg text-black"
+            className="rounded-lg border border-stone-300 bg-white px-4 py-3 text-lg text-stone-900"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="current-password"
           />
         </label>
-        {msg ? <p className="text-sm font-semibold text-yellow-200">{msg}</p> : null}
+        {msg ? <p className="text-sm font-semibold text-red-700">{msg}</p> : null}
         <button
           type="submit"
           disabled={busy}
-          className="mt-2 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] shadow-[4px_4px_0_#2d1f18] active:translate-y-0.5 disabled:opacity-60"
+          className="mt-2 rounded-xl border border-stone-400 bg-stone-800 py-4 text-xl font-semibold text-white shadow-sm active:translate-y-0.5 disabled:opacity-60"
         >
           {busy ? "Loading…" : "Enter"}
         </button>

@@ -25,17 +25,17 @@ export function ParentLocalView({ userId }: { userId: string }) {
   }, [userId]);
 
   return (
-    <div className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+    <div className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
       <h2 className="text-xl font-black">Latest report</h2>
-      <p className="mt-2 text-xs text-white/70">
+      <p className="mt-2 text-xs text-stone-500">
         Saved in this browser (add Supabase on the server for cloud sync).
       </p>
       {!report ? (
-        <p className="mt-3 text-sm text-white/90">
+        <p className="mt-3 text-sm text-stone-700">
           No report yet — finish step (h) on the quest screen.
         </p>
       ) : (
-        <pre className="mt-4 overflow-auto rounded-lg bg-black/30 p-4 text-sm leading-relaxed">
+        <pre className="mt-4 overflow-auto rounded-lg bg-stone-100 p-4 text-sm leading-relaxed text-stone-800">
           {JSON.stringify(report, null, 2)}
         </pre>
       )}

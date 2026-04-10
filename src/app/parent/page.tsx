@@ -15,18 +15,18 @@ export default async function ParentPage() {
 
   if (session.persistence === "local") {
     return (
-      <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-6 px-4 py-10 text-white">
-        <div className="rounded-2xl border-4 border-[#5c4033] bg-[#2d6a4f] p-6 shadow-[6px_6px_0_#2d1f18]">
+      <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-6 px-4 py-10 text-stone-800">
+        <div className="rounded-2xl border border-stone-300 bg-stone-100 p-6 shadow-sm">
           <h1 className="text-3xl font-black">Parent dashboard</h1>
-          <p className="mt-2 text-sm text-white/80">Week of {week}</p>
+          <p className="mt-2 text-sm text-stone-600">Week of {week}</p>
           <Link
             href="/app"
-            className="mt-4 inline-block rounded-lg border-2 border-[#2d1f18] bg-[#f4d03f] px-4 py-2 text-sm font-black text-[#2d1f18]"
+            className="mt-4 inline-block rounded-lg border border-stone-400 bg-stone-800 px-4 py-2 text-sm font-semibold text-white"
           >
             Back to quest
           </Link>
         </div>
-        <ParentLocalView userId={session.user.id} />
+        <ParentLocalView userId={session.user.email ?? session.user.id} />
       </div>
     );
   }
@@ -38,28 +38,28 @@ export default async function ParentPage() {
   const report = row?.parent_report as ParentReport | null | undefined;
 
   return (
-    <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-6 px-4 py-10 text-white">
-      <div className="rounded-2xl border-4 border-[#5c4033] bg-[#2d6a4f] p-6 shadow-[6px_6px_0_#2d1f18]">
+    <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-6 px-4 py-10 text-stone-800">
+      <div className="rounded-2xl border border-stone-300 bg-stone-100 p-6 shadow-sm">
         <h1 className="text-3xl font-black">Parent dashboard</h1>
-        <p className="mt-2 text-sm text-white/80">
+        <p className="mt-2 text-sm text-stone-600">
           Same login as Elio — week of {week}
         </p>
         <Link
           href="/app"
-          className="mt-4 inline-block rounded-lg border-2 border-[#2d1f18] bg-[#f4d03f] px-4 py-2 text-sm font-black text-[#2d1f18]"
+          className="mt-4 inline-block rounded-lg border border-stone-400 bg-stone-800 px-4 py-2 text-sm font-semibold text-white"
         >
           Back to quest
         </Link>
       </div>
 
-      <div className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+      <div className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
         <h2 className="text-xl font-black">Latest report</h2>
         {!report ? (
-          <p className="mt-3 text-sm text-white/90">
+          <p className="mt-3 text-sm text-stone-700">
             No report yet — finish step (h) on the quest screen.
           </p>
         ) : (
-          <pre className="mt-4 overflow-auto rounded-lg bg-black/30 p-4 text-sm leading-relaxed">
+          <pre className="mt-4 overflow-auto rounded-lg bg-stone-100 p-4 text-sm leading-relaxed text-stone-800">
             {JSON.stringify(report, null, 2)}
           </pre>
         )}

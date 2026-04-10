@@ -64,6 +64,11 @@ function localStorageKey(userId: string, week: string) {
   return `elio_german_homework_${userId}_${week}`;
 }
 
+/** Per-browser storage id: Elio users share one Supabase UUID — use email so each login keeps its own progress. */
+function storageUserId(user: User, useLocal: boolean) {
+  return useLocal ? (user.email ?? user.id) : user.id;
+}
+
 function relativeNotebookTime(ts: number) {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 45) return "Just now";
@@ -82,12 +87,13 @@ export function QuestClient({
   const currentWeekStart = useMemo(() => getWeekStartIso(), []);
   const [weekStart, setWeekStart] = useState(currentWeekStart);
   const [weeksIndex, setWeeksIndex] = useState<Array<{ week_start: string; title: string }>>([]);
-  const notebookAttemptsKey = useMemo(
-    () => notebookAttemptsStorageKey(user.id, weekStart),
-    [user.id, weekStart],
-  );
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const useLocal = persistence === "local";
+  const storageUserKey = useMemo(() => storageUserId(user, useLocal), [user, useLocal]);
+  const notebookAttemptsKey = useMemo(
+    () => notebookAttemptsStorageKey(storageUserKey, weekStart),
+    [storageUserKey, weekStart],
+  );
 
   const [loaded, setLoaded] = useState(false);
   const [extracted, setExtracted] = useState<ExtractedHomework | null>(null);
@@ -451,6 +457,20 @@ export function QuestClient({
     }
   }
 
+  /** Enter advances past success/fail feedback images (no need to click Next). */
+  useEffect(() => {
+    if (!dictation?.result || dictation.complete) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Enter" || e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("iframe")) return;
+      e.preventDefault();
+      void dictationContinueAfterResult();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dictation?.result, dictation?.complete]);
+
   function resetDictationSession() {
     if (!extracted) return;
     const words = tokenizeWords(extracted.full_german_text).map((x) => x.w);
@@ -622,7 +642,7 @@ export function QuestClient({
       if (useLocal && typeof window !== "undefined") {
         try {
           localStorage.setItem(
-            localStorageKey(user.id, weekStart),
+            localStorageKey(storageUserKey, weekStart),
             JSON.stringify({
               extracted: ex,
               progress: pr,
@@ -647,7 +667,7 @@ export function QuestClient({
     [
       useLocal,
       supabase,
-      user.id,
+      storageUserKey,
       weekStart,
       extracted,
       progress,
@@ -659,7 +679,6 @@ export function QuestClient({
   // Preload free translations once per homework (sentence + words), then persist into `extracted`.
   useEffect(() => {
     if (!extracted) return;
-    if (useLocal) return;
     const hasSentenceEn = (extracted.sentence_translations_en || []).some((x) => (x || "").trim());
     const hasWordEn = (extracted.special_words || []).some((x) => (x.en || "").trim());
     if (hasSentenceEn && hasWordEn) return;
@@ -745,7 +764,19 @@ export function QuestClient({
     (async () => {
       if (useLocal) {
         try {
-          const raw = localStorage.getItem(localStorageKey(user.id, weekStart));
+          const keyNew = localStorageKey(storageUserKey, weekStart);
+          let raw = localStorage.getItem(keyNew);
+          if (!raw && storageUserKey !== user.id) {
+            const legacy = localStorage.getItem(localStorageKey(user.id, weekStart));
+            if (legacy) {
+              raw = legacy;
+              try {
+                localStorage.setItem(keyNew, legacy);
+              } catch {
+                /* quota */
+              }
+            }
+          }
           if (raw) {
             const bundle = JSON.parse(raw) as {
               extracted?: ExtractedHomework;
@@ -809,12 +840,20 @@ export function QuestClient({
         setLoaded(true);
       }
     })();
-  }, [useLocal, supabase, user.id, weekStart]);
+  }, [useLocal, supabase, user.id, storageUserKey, weekStart]);
 
   useEffect(() => {
     if (!loaded) return;
-    setNotebookAttempts(loadNotebookAttempts(notebookAttemptsKey));
-  }, [loaded, notebookAttemptsKey]);
+    let items = loadNotebookAttempts(notebookAttemptsKey);
+    if (!items.length && storageUserKey !== user.id) {
+      const legacy = loadNotebookAttempts(notebookAttemptsStorageKey(user.id, weekStart));
+      if (legacy.length) {
+        items = legacy;
+        saveNotebookAttempts(notebookAttemptsKey, legacy);
+      }
+    }
+    setNotebookAttempts(items);
+  }, [loaded, notebookAttemptsKey, storageUserKey, user.id, weekStart]);
 
   function goToStep(next: HomeworkProgressStep) {
     setProgress((p) => {
@@ -930,7 +969,7 @@ export function QuestClient({
     const checks = hw.word_checks;
     if (!checks?.length) {
       return (
-        <p className="mt-2 text-xs text-white/60">
+        <p className="mt-2 text-xs text-stone-500">
           Word-by-word data was not returned — compare the two text boxes above.
         </p>
       );
@@ -952,10 +991,10 @@ export function QuestClient({
             >
               <div className="text-lg font-black">{w}</div>
               {wc?.word_seen?.trim() ? (
-                <p className="mt-0.5 text-xs text-white/80">Seen: {wc.word_seen}</p>
+                <p className="mt-0.5 text-xs text-stone-600">Seen: {wc.word_seen}</p>
               ) : null}
               {wc && !wc.ok ? (
-                <p className="mt-1 text-left text-xs leading-snug text-white/95">{wc.hint_en}</p>
+                <p className="mt-1 text-left text-xs leading-snug text-stone-800">{wc.hint_en}</p>
               ) : null}
             </div>
           );
@@ -1165,7 +1204,7 @@ export function QuestClient({
 
   if (!useLocal && !supabase) {
     return (
-      <div className="p-6 text-center text-xl font-bold text-white">
+      <div className="p-6 text-center text-xl font-bold text-stone-800">
         Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.
       </div>
     );
@@ -1173,7 +1212,7 @@ export function QuestClient({
 
   if (!loaded) {
     return (
-      <div className="flex min-h-[50vh] items-center justify-center text-xl font-bold text-white">
+      <div className="flex min-h-[50vh] items-center justify-center text-xl font-bold text-stone-700">
         Loading your week…
       </div>
     );
@@ -1182,28 +1221,28 @@ export function QuestClient({
   const step = progress.step;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 pb-24 text-white">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 pb-24 text-stone-800">
       <PrankReward trigger={rewardTick} />
 
-      <header className="rounded-2xl border-4 border-[#5c4033] bg-[#2d6a4f] p-4 shadow-[6px_6px_0_#2d1f18]">
+      <header className="rounded-2xl border border-stone-300 bg-stone-100 p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-bold text-white/80">This week</p>
+            <p className="text-sm font-bold text-stone-600">This week</p>
             <p className="text-2xl font-black">
               {extracted?.title ? `Continue: ${extracted.title}` : "New homework quest"}
             </p>
-            <p className="text-xs text-white/70">Week of {weekStart}</p>
+            <p className="text-xs text-stone-500">Week of {weekStart}</p>
           </div>
           <div className="flex gap-2">
             <Link
               href="/parent"
-              className="rounded-lg border-2 border-[#2d1f18] bg-[#f4d03f] px-3 py-2 text-sm font-black text-[#2d1f18]"
+              className="rounded-lg border-2 border-stone-400 bg-[#f4d03f] px-3 py-2 text-sm font-black text-[#2d1f18]"
             >
               Parent
             </Link>
             <button
               type="button"
-              className="rounded-lg border-2 border-[#2d1f18] bg-white/10 px-3 py-2 text-sm font-bold"
+              className="rounded-lg border-2 border-stone-400 bg-white/10 px-3 py-2 text-sm font-bold"
               onClick={() => {
                 if (useLocal) {
                   void fetch("/api/auth/elio", { method: "DELETE" }).then(() =>
@@ -1221,11 +1260,11 @@ export function QuestClient({
 
         {!useLocal && weeksIndex.length > 0 ? (
           <div className="mt-3">
-            <label className="text-xs font-bold text-white/70">Week</label>
+            <label className="text-xs font-bold text-stone-600">Week</label>
             <select
               value={weekStart}
               onChange={(e) => setWeekStart(e.target.value)}
-              className="mt-1 w-full rounded-lg border-2 border-[#2d1f18] bg-white/10 px-3 py-2 text-sm font-bold text-white"
+              className="mt-1 w-full rounded-lg border-2 border-stone-400 bg-white px-3 py-2 text-sm font-bold text-stone-900"
             >
               {weeksIndex.map((w) => (
                 <option key={w.week_start} value={w.week_start}>
@@ -1259,8 +1298,8 @@ export function QuestClient({
                   current ? "bg-[#f4d03f] text-[#2d1f18] ring-2 ring-[#2d1f18]" : ""
                 } ${
                   locked ?
-                    "cursor-not-allowed bg-black/10 text-white/40"
-                  : "cursor-pointer bg-black/25 text-white hover:bg-black/35"
+                    "cursor-not-allowed bg-stone-100 text-stone-400"
+                  : "cursor-pointer bg-stone-200 text-stone-800 hover:bg-stone-300"
                 } `}
               >
                 {QUEST_STEP_LABELS[id]}
@@ -1289,36 +1328,36 @@ export function QuestClient({
 
       {/* a — manual homework text (no photo scanning) */}
       {step === "a_upload" ? (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Type the homework text</h2>
 
-          <label className="mt-4 block text-sm font-bold text-white/90">Title (optional)</label>
+          <label className="mt-4 block text-sm font-bold text-stone-800">Title (optional)</label>
           <input
             value={draftTitle}
             onChange={(e) => setDraftTitle(e.target.value)}
-            className="mt-2 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 text-base font-bold text-black"
+            className="mt-2 w-full rounded-xl border-4 border-stone-400 bg-white p-3 text-base font-bold text-black"
             autoComplete="off"
           />
 
-          <label className="mt-4 block text-sm font-bold text-white/90">German text to copy</label>
+          <label className="mt-4 block text-sm font-bold text-stone-800">German text to copy</label>
           <textarea
             value={draftFullText}
             onChange={(e) => setDraftFullText(e.target.value)}
             rows={10}
-            className="mt-2 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 font-mono text-base text-black"
+            className="mt-2 w-full rounded-xl border-4 border-stone-400 bg-white p-3 font-mono text-base text-black"
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
           />
 
-          <label className="mt-4 block text-sm font-bold text-white/90">
+          <label className="mt-4 block text-sm font-bold text-stone-800">
             Instructions (optional, one per line)
           </label>
           <textarea
             value={draftInstructions}
             onChange={(e) => setDraftInstructions(e.target.value)}
             rows={4}
-            className="mt-2 w-full rounded-xl border-4 border-[#2d1f18] bg-white p-3 text-base text-black"
+            className="mt-2 w-full rounded-xl border-4 border-stone-400 bg-white p-3 text-base text-black"
             autoComplete="off"
             autoCorrect="on"
             spellCheck={true}
@@ -1328,7 +1367,7 @@ export function QuestClient({
             type="button"
             disabled={!!busy}
             onClick={saveManualHomeworkAndContinue}
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:opacity-50"
+            className="mt-4 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:opacity-50"
           >
             {busy || "Save & go to notebook"}
           </button>
@@ -1337,9 +1376,9 @@ export function QuestClient({
 
       {/* b */}
       {step === "b_notebook" && extracted && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Notebook copy</h2>
-          <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-[#2d1f18] bg-[#2d6a4f] px-4 py-5 text-center active:scale-[0.99]">
+          <label className="mt-4 flex min-h-[4rem] cursor-pointer flex-col items-center justify-center rounded-xl border-4 border-dashed border-stone-400 bg-stone-200 px-4 py-5 text-center active:scale-[0.99]">
             <input
               type="file"
               accept="image/*"
@@ -1349,7 +1388,7 @@ export function QuestClient({
               onChange={(e) => setNbFiles(Array.from(e.target.files || []))}
             />
             <span className="text-lg font-black">📷 Tap here to photograph your writing</span>
-            <span className="mt-1 text-sm font-semibold text-white/85">
+            <span className="mt-1 text-sm font-semibold text-stone-700">
               1 or 2 clear pictures of your notebook page
             </span>
           </label>
@@ -1365,7 +1404,7 @@ export function QuestClient({
               type="button"
               disabled={!nbFiles.length || !!busy}
               onClick={() => void runVisionNotebook()}
-              className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:opacity-50"
+              className="w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:opacity-50"
             >
               {busy || "Check notebook"}
             </button>
@@ -1389,7 +1428,7 @@ export function QuestClient({
                   className="rounded-xl border-2 border-white/25 bg-black/25 p-3 shadow-inner"
                 >
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <span className="text-sm font-bold text-white/90">
+                    <span className="text-sm font-bold text-stone-800">
                       {relativeNotebookTime(attempt.createdAt)}
                     </span>
                     {idx === 0 ? (
@@ -1410,13 +1449,13 @@ export function QuestClient({
                       ))}
                     </div>
                   ) : (
-                    <p className="mt-2 text-xs text-white/60">
+                    <p className="mt-2 text-xs text-stone-500">
                       (Photo preview not saved — feedback still applies.)
                     </p>
                   )}
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
                     <div className="rounded-lg bg-black/35 p-3 ring-1 ring-white/15">
-                      <p className="text-xs font-bold uppercase tracking-wide text-white/70">
+                      <p className="text-xs font-bold uppercase tracking-wide text-stone-600">
                         From your photo
                       </p>
                       <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
@@ -1432,7 +1471,7 @@ export function QuestClient({
                       </p>
                     </div>
                   </div>
-                  <p className="mt-3 text-sm text-white/90">{attempt.handwriting.summary}</p>
+                  <p className="mt-3 text-sm text-stone-700">{attempt.handwriting.summary}</p>
                   {notebookWordTiles(attempt.handwriting)}
                 </div>
               ))}
@@ -1440,7 +1479,7 @@ export function QuestClient({
           ) : handwriting ? (
             <div className="mt-6 border-t-2 border-white/20 pt-4">
               <p className="font-bold text-[#f4d03f]">Last saved check</p>
-              <p className="mt-3 text-sm text-white/90">{handwriting.summary}</p>
+              <p className="mt-3 text-sm text-stone-700">{handwriting.summary}</p>
               {notebookWordTiles(handwriting)}
             </div>
           ) : null}
@@ -1448,7 +1487,7 @@ export function QuestClient({
           {(notebookAttempts.length > 0 || handwriting) ? (
             <button
               type="button"
-              className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
+              className="mt-6 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
               onClick={() => goToStep("c_guide")}
             >
               Continue to next step
@@ -1459,7 +1498,7 @@ export function QuestClient({
 
       {/* c */}
       {step === "c_guide" && extracted && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Task</h2>
           {extracted.main_task_summary_en ? (
             <p className="mt-3 rounded-lg bg-black/25 p-3 text-base font-semibold leading-relaxed">
@@ -1478,7 +1517,7 @@ export function QuestClient({
           ) : null}
           <button
             type="button"
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
+            className="mt-4 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
             onClick={() => goToStep("e_read_aloud")}
           >
             Continue
@@ -1488,11 +1527,11 @@ export function QuestClient({
 
       {/* e */}
       {step === "e_read_aloud" && extracted && readSents.length > 0 && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Listen</h2>
           <div
             ref={readListRef}
-            className="mt-3 max-h-[min(28rem,55vh)] overflow-y-auto rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-2 text-sm leading-relaxed"
+            className="mt-3 max-h-[min(28rem,55vh)] overflow-y-auto rounded-xl border-2 border-stone-400 bg-stone-200 p-2 text-sm leading-relaxed"
           >
             {readSents.map((line, i) => (
               <div
@@ -1506,7 +1545,7 @@ export function QuestClient({
                   : "hover:bg-white/5"
                 }`}
               >
-                <span className="mr-1 align-top font-bold text-white/50">{i + 1}.</span>
+                <span className="mr-1 align-top font-bold text-stone-400">{i + 1}.</span>
                 <ListenInlineSentence
                   sentence={line}
                   onWordPointerDown={(lemma) => void onListenWordDown(lemma, line)}
@@ -1517,10 +1556,10 @@ export function QuestClient({
           </div>
 
           {listenTip ? (
-            <div className="mt-3 rounded-xl border-2 border-[#2d1f18] bg-[#1a472a] p-3 text-left shadow-lg">
-              <p className="text-xs font-bold uppercase tracking-wide text-white/60">Meaning</p>
+            <div className="mt-3 rounded-xl border-2 border-stone-400 bg-stone-200 p-3 text-left shadow-lg">
+              <p className="text-xs font-bold uppercase tracking-wide text-stone-600">Meaning</p>
               <p className="text-lg font-black text-[#f4d03f]">{listenTip.word}</p>
-              <p className="mt-1 text-sm text-white/95">{listenTip.text}</p>
+              <p className="mt-1 text-sm text-stone-800">{listenTip.text}</p>
             </div>
           ) : null}
 
@@ -1528,7 +1567,7 @@ export function QuestClient({
             <span className="font-bold text-[#f4d03f]">EN: </span>
             {readTrans[highlightSentence]?.trim() || "—"}
           </p>
-          <p className="mt-3 text-sm font-bold text-white/80">Speaking speed</p>
+          <p className="mt-3 text-sm font-bold text-stone-600">Speaking speed</p>
           <input
             type="range"
             min={0.55}
@@ -1538,7 +1577,7 @@ export function QuestClient({
             onChange={(e) => setReadAloudSpeed(Number(e.target.value))}
             className="mt-1 w-full"
           />
-          <p className="text-xs text-white/60">Slower ← {readAloudSpeed.toFixed(2)} → Faster</p>
+          <p className="text-xs text-stone-500">Slower ← {readAloudSpeed.toFixed(2)} → Faster</p>
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
             <button
               type="button"
@@ -1560,7 +1599,7 @@ export function QuestClient({
               type="button"
               disabled={!!busy}
               onClick={() => void playCurrentSentenceAloud()}
-              className="col-span-2 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-lg font-black text-[#2d1f18] disabled:opacity-50 sm:col-span-2"
+              className="col-span-2 rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-3 text-lg font-black text-[#2d1f18] disabled:opacity-50 sm:col-span-2"
             >
               {busy || "🔊 Play this sentence"}
             </button>
@@ -1577,7 +1616,7 @@ export function QuestClient({
 
       {/* f */}
       {step === "f_user_read" && extracted && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">You read</h2>
           {sentencesFromExtracted(extracted).length > 1 ? (
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1606,7 +1645,7 @@ export function QuestClient({
           ) : null}
           <button
             type="button"
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#2d6a4f] py-3 text-lg font-black text-white"
+            className="mt-4 w-full rounded-xl border-4 border-stone-400 bg-stone-200 py-3 text-lg font-black text-stone-900"
             onClick={() => {
               const s = sentencesFromExtracted(extracted)[fSentenceIdx];
               if (s) void playTts(s, "de", 0.75);
@@ -1617,12 +1656,12 @@ export function QuestClient({
 
           <div className="mt-4 rounded-xl border-2 border-white/20 bg-black/20 p-3">
             <p className="text-sm font-bold text-[#f4d03f]">Listening check (microphone)</p>
-            <p className="mt-1 text-xs text-white/80">Allow the mic when asked.</p>
+            <p className="mt-1 text-xs text-stone-600">Allow the mic when asked.</p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               {listenState.kind !== "listening" ? (
                 <button
                   type="button"
-                  className="flex-1 rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
+                  className="flex-1 rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-3 text-base font-black text-[#2d1f18]"
                   onClick={() => {
                     const s = sentencesFromExtracted(extracted)[fSentenceIdx] || "";
                     if (s) startListeningCheck(s);
@@ -1657,11 +1696,11 @@ export function QuestClient({
               <p className="mt-3 rounded-lg bg-red-900/30 p-3 text-sm">{listenState.message}</p>
             ) : null}
             {listenState.kind === "done" ? (
-              <div className="mt-3 rounded-lg bg-black/30 p-3">
+              <div className="mt-3 rounded-lg bg-stone-100 p-3">
                 <p className="text-sm font-bold">
                   Score: <span className="text-[#f4d03f]">{listenState.scorePct}%</span>
                 </p>
-                <p className="mt-2 text-xs font-bold uppercase tracking-wide text-white/70">
+                <p className="mt-2 text-xs font-bold uppercase tracking-wide text-stone-600">
                   What we heard
                 </p>
                 <p className="mt-1 whitespace-pre-wrap text-sm">{listenState.transcript}</p>
@@ -1727,12 +1766,12 @@ export function QuestClient({
               </button>
             )}
           </div>
-          <p className="mt-2 text-xs text-white/60">
+          <p className="mt-2 text-xs text-stone-500">
             Voice debug: {voiceEvents.slice(-4).join(", ") || "—"}
           </p>
           <button
             type="button"
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
+            className="mt-4 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18]"
             onClick={() => goToStep("g_dictation")}
           >
             Next: dictation
@@ -1742,7 +1781,7 @@ export function QuestClient({
 
       {/* g — dictation */}
       {step === "g_dictation" && extracted && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Dictation</h2>
 
           {dictation && dictation.words.length > 0 ? (
@@ -1755,12 +1794,12 @@ export function QuestClient({
                 const pct = totalW ? Math.round((masteredCount / totalW) * 100) : 0;
                 return (
                   <>
-                    <div className="rounded-xl border-2 border-white/25 bg-black/20 p-3">
+                    <div className="rounded-xl border border-stone-200 bg-stone-50 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-bold">
                         <span>
                           Progress: {masteredCount} / {totalW} words ({pct}%)
                         </span>
-                        <span className="text-white/70">Attempts: {d.totalAttempts}</span>
+                        <span className="text-stone-600">Attempts: {d.totalAttempts}</span>
                       </div>
                       <div className="mt-2 h-3 w-full overflow-hidden rounded-full bg-black/30">
                         <div
@@ -1771,7 +1810,7 @@ export function QuestClient({
                     </div>
 
                     {d.complete ? (
-                      <div className="rounded-xl border-4 border-[#f4d03f] bg-[#1a472a] p-4 text-center">
+                      <div className="rounded-xl border-4 border-[#f4d03f] bg-stone-200 p-4 text-center">
                         <p className="text-xl font-black text-[#f4d03f]">100% — all words correct!</p>
                         <div className="mt-4 aspect-video w-full overflow-hidden rounded-lg">
                           <iframe
@@ -1784,7 +1823,7 @@ export function QuestClient({
                         </div>
                       </div>
                     ) : d.result ? (
-                      <div className="rounded-xl border-2 border-white/25 bg-black/25 p-4 text-center">
+                      <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-center">
                         <img
                           src={d.result.imageUrl}
                           alt=""
@@ -1795,8 +1834,8 @@ export function QuestClient({
                             <p className="font-black text-lg">Not quite</p>
                             <div className="mt-3 grid gap-2 sm:grid-cols-2">
                               <div className="rounded-lg bg-black/25 p-2">
-                                <p className="text-xs font-bold uppercase text-white/60">You wrote</p>
-                                <p className="text-lg font-bold text-white">
+                                <p className="text-xs font-bold uppercase text-stone-600">You wrote</p>
+                                <p className="text-lg font-bold text-stone-900">
                                   {d.result.written ? `"${d.result.written}"` : "(empty)"}
                                 </p>
                               </div>
@@ -1805,7 +1844,7 @@ export function QuestClient({
                                 <p className="text-lg font-bold text-[#f4d03f]">{d.result.expected}</p>
                               </div>
                             </div>
-                            <p className="mt-3 text-sm text-white/90">
+                            <p className="mt-3 text-sm text-stone-700">
                               {dictationHint(
                                 d.result.expected,
                                 d.result.written,
@@ -1820,7 +1859,7 @@ export function QuestClient({
                         )}
                         <button
                           type="button"
-                          className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                          className="mt-4 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
                           onClick={() => void dictationContinueAfterResult()}
                         >
                           {d.result.kind === "correct" && d.result.isFinal ?
@@ -1856,7 +1895,7 @@ export function QuestClient({
                             setDictation((prev) => (prev ? { ...prev, typed: e.target.value } : prev))
                           }
                           placeholder={d.readyToType ? "Type the word…" : "Listen…"}
-                          className="w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black disabled:opacity-60"
+                          className="w-full rounded-xl border-4 border-stone-400 p-4 text-2xl font-bold text-black disabled:opacity-60"
                           autoCapitalize="off"
                           autoCorrect="off"
                           disabled={!d.readyToType}
@@ -1870,7 +1909,7 @@ export function QuestClient({
 
                         <button
                           type="button"
-                          className="w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18] disabled:opacity-50"
+                          className="w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-3 font-black text-[#2d1f18] disabled:opacity-50"
                           onClick={() => void submitDictation()}
                           disabled={!target || !d.readyToType}
                         >
@@ -1895,7 +1934,7 @@ export function QuestClient({
           <button
             type="button"
             disabled={!dictation?.complete}
-            className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:cursor-not-allowed disabled:opacity-45"
+            className="mt-6 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 text-xl font-black text-[#2d1f18] disabled:cursor-not-allowed disabled:opacity-45"
             onClick={() => goToStep("g_repeat_spelling")}
           >
             Next: practice & spelling
@@ -1905,9 +1944,9 @@ export function QuestClient({
 
       {/* g */}
       {step === "g_repeat_spelling" && extracted && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Practice & spelling</h2>
-          <p className="mt-3 text-xs text-white/75">
+          <p className="mt-3 text-xs text-stone-500">
             <span className="inline-block h-2 w-2 rounded bg-green-500 align-middle" /> OK ·{" "}
             <span className="inline-block h-2 w-2 rounded bg-blue-600 align-middle" /> Almost ·{" "}
             <span className="inline-block h-2 w-2 rounded bg-red-600 align-middle" /> Hard — then spelling.
@@ -1941,7 +1980,7 @@ export function QuestClient({
               {!spellTarget ? (
                 <button
                   type="button"
-                  className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                  className="mt-3 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
                   onClick={startSpelling}
                 >
                   Start spelling game
@@ -1958,13 +1997,13 @@ export function QuestClient({
                   <input
                     value={spellInput}
                     onChange={(e) => setSpellInput(e.target.value)}
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] p-4 text-2xl font-bold text-black"
+                    className="mt-3 w-full rounded-xl border-4 border-stone-400 p-4 text-2xl font-bold text-black"
                     autoCapitalize="off"
                     autoCorrect="off"
                   />
                   <button
                     type="button"
-                    className="mt-3 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
+                    className="mt-3 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-3 font-black text-[#2d1f18]"
                     onClick={() => void checkSpelling()}
                   >
                     Check
@@ -1981,7 +2020,7 @@ export function QuestClient({
 
           <button
             type="button"
-            className="mt-6 w-full rounded-xl border-4 border-[#2d1f18] bg-white/10 py-4 font-black"
+            className="mt-6 w-full rounded-xl border-4 border-stone-400 bg-white/10 py-4 font-black"
             onClick={finishToReport}
           >
             Finish & parent report
@@ -1991,14 +2030,14 @@ export function QuestClient({
 
       {/* h */}
       {(step === "h_report" || step === "done") && parentReport && (
-        <section className="rounded-2xl border-4 border-[#5c4033] bg-[#40916c] p-4">
+        <section className="rounded-2xl border border-stone-300 bg-white p-4 shadow-sm">
           <h2 className="text-xl font-black">Parent report</h2>
           <pre className="mt-4 overflow-auto rounded-lg bg-black/30 p-4 text-sm leading-relaxed">
             {JSON.stringify(parentReport, null, 2)}
           </pre>
           <button
             type="button"
-            className="mt-4 w-full rounded-xl border-4 border-[#2d1f18] bg-[#f4d03f] py-4 font-black text-[#2d1f18]"
+            className="mt-4 w-full rounded-xl border-4 border-stone-400 bg-[#f4d03f] py-4 font-black text-[#2d1f18]"
             onClick={() => goToStep("done")}
           >
             Done

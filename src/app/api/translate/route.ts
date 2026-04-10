@@ -37,23 +37,71 @@ export async function POST(req: Request) {
     const hit = cacheGet(key);
     if (hit) return NextResponse.json({ ok: true, text: hit });
 
-    // MyMemory: free, no API key. (Public service; best-effort.)
+    function cleanMyMemory(s: string): string {
+      let t = s.trim();
+      if (/MYMEMORY\s+WARNING/i.test(t)) {
+        const lines = t.split(/\n/).filter((line) => !/MYMEMORY\s+WARNING/i.test(line));
+        t = lines.join(" ").trim();
+      }
+      return t;
+    }
+
+    async function tryLibreTranslate(): Promise<string | null> {
+      try {
+        const r = await fetch("https://libretranslate.com/translate", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "User-Agent": "ElioGerman/1.0 (translation)",
+          },
+          body: JSON.stringify({ q: text, source, target, format: "text" }),
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { translatedText?: string };
+        const t = String(j?.translatedText || "").trim();
+        return t || null;
+      } catch {
+        return null;
+      }
+    }
+
+    // MyMemory: free, no API key. (Often returns a quota warning line — strip it.)
     const url =
       "https://api.mymemory.translated.net/get" +
       `?q=${encodeURIComponent(text)}` +
       `&langpair=${encodeURIComponent(`${source}|${target}`)}`;
-    const res = await fetch(url, { method: "GET" });
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "ElioGerman/1.0 (translation)",
+      },
+    });
     const raw = await res.text();
     if (!res.ok) {
+      const fb = await tryLibreTranslate();
+      if (fb) {
+        cacheSet(key, fb);
+        return NextResponse.json({ ok: true, text: fb });
+      }
       return NextResponse.json({ ok: false, error: `translate failed: HTTP ${res.status}` }, { status: 502 });
     }
     let json: any;
     try {
       json = JSON.parse(raw);
     } catch {
+      const fb = await tryLibreTranslate();
+      if (fb) {
+        cacheSet(key, fb);
+        return NextResponse.json({ ok: true, text: fb });
+      }
       return NextResponse.json({ ok: false, error: "translate failed: bad json" }, { status: 502 });
     }
-    const out = String(json?.responseData?.translatedText || "").trim();
+    let out = cleanMyMemory(String(json?.responseData?.translatedText || ""));
+    if (!out || /^MYMEMORY/i.test(out)) {
+      out = (await tryLibreTranslate()) || "";
+    }
     if (!out) {
       return NextResponse.json({ ok: false, error: "translate failed: empty" }, { status: 502 });
     }
