@@ -159,8 +159,8 @@ export function QuestClient({
     null,
   );
   const [spellInput, setSpellInput] = useState("");
-  const [spellStats, setSpellStats] = useState({ correct: 0, total: 0 });
   const [spellingDone, setSpellingDone] = useState(false);
+  const spellStats = progress.spelling_stats ?? { correct: 0, total: 0 };
 
   const startedRef = useRef<number | null>(null);
   const [voiceEvents, setVoiceEvents] = useState<string[]>([]);
@@ -227,11 +227,21 @@ export function QuestClient({
 
   useEffect(() => {
     if (progress.step !== "g_dictation" || !extracted) return;
+    const saved = progress.dictation_progress;
     setDictation((d) => {
       if (d && d.words.length > 0) return d;
       const words = tokenizeWords(extracted.full_german_text).map((x) => x.w);
       if (words.length === 0) return null;
-      const currentIdx = Math.floor(Math.random() * words.length);
+      const flags = computeDictationCaseFoldFlags(extracted);
+      let mastered = words.map(() => false);
+      let totalAttempts = 0;
+      let complete = false;
+      if (saved?.mastered?.length === words.length) {
+        mastered = saved.mastered;
+        totalAttempts = saved.totalAttempts ?? 0;
+        complete = saved.complete ?? false;
+      }
+      const currentIdx = complete ? 0 : pickRandomUnmasteredIndex(mastered);
       const first = words[currentIdx]!;
       const playEpoch = bumpDictationPlayEpoch();
       queueMicrotask(() => {
@@ -249,18 +259,51 @@ export function QuestClient({
       });
       return {
         words,
-        mastered: words.map(() => false),
+        mastered,
         currentIdx,
         typed: "",
-        allowCaseFoldAtIdx: computeDictationCaseFoldFlags(extracted),
+        allowCaseFoldAtIdx: flags,
         result: null,
-        totalAttempts: 0,
-        complete: false,
+        totalAttempts,
+        complete,
         readyToType: false,
         playEpoch,
       };
     });
   }, [progress.step, extracted]);
+
+  /** Persist dictation word grid (survives logout for Elio + Supabase). */
+  useEffect(() => {
+    if (!loaded || progress.step !== "g_dictation" || !dictation) return;
+    const snap = {
+      mastered: [...dictation.mastered],
+      totalAttempts: dictation.totalAttempts,
+      complete: dictation.complete,
+    };
+    const prev = progress.dictation_progress;
+    if (
+      prev &&
+      prev.mastered.length === snap.mastered.length &&
+      prev.mastered.every((v, i) => v === snap.mastered[i]) &&
+      prev.totalAttempts === snap.totalAttempts &&
+      prev.complete === snap.complete
+    ) {
+      return;
+    }
+    setProgress((p) => {
+      const n = { ...p, dictation_progress: snap };
+      void persist({ progress: n });
+      return n;
+    });
+    // persist is stable enough; including it re-runs this effect every progress tick
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    loaded,
+    progress.step,
+    dictation?.mastered,
+    dictation?.totalAttempts,
+    dictation?.complete,
+  ]);
 
   function computeDictationCaseFoldFlags(ex: ExtractedHomework): boolean[] {
     // Determine sentence starts from the *raw* stream (keeps punctuation), then map 1:1 to tokenized words.
@@ -482,6 +525,11 @@ export function QuestClient({
       setDictation(null);
       return;
     }
+    setProgress((p) => {
+      const n = { ...p, dictation_progress: undefined };
+      void persist({ progress: n });
+      return n;
+    });
     const currentIdx = Math.floor(Math.random() * words.length);
     const first = words[currentIdx]!;
     const playEpoch = bumpDictationPlayEpoch();
@@ -838,8 +886,8 @@ export function QuestClient({
         ]);
         setWeeksIndex(idx.map((x) => ({ week_start: x.week_start, title: x.title })));
         if (assignment?.extracted) setExtracted(assignment.extracted);
-        if (student?.progress) {
-          const rp = student.progress as HomeworkProgress;
+        const rp = student?.progress as HomeworkProgress | undefined;
+        if (rp?.step) {
           const migratedStep = migrateProgressStep(String(rp.step));
           const maxIdx = QUEST_STEP_ORDER.length - 1;
           setProgress({
@@ -850,6 +898,41 @@ export function QuestClient({
               maxIdx,
             ),
           });
+        } else if (user.email) {
+          try {
+            const raw = localStorage.getItem(localStorageKey(user.email, weekStart));
+            if (raw) {
+              const bundle = JSON.parse(raw) as {
+                progress?: HomeworkProgress;
+                handwriting?: HandwritingResult | null;
+                parent_report?: ParentReport | null;
+              };
+              if (bundle.progress?.step) {
+                const bp = bundle.progress;
+                const migratedStep = migrateProgressStep(String(bp.step));
+                const maxIdx = QUEST_STEP_ORDER.length - 1;
+                setProgress({
+                  ...bp,
+                  step: migratedStep,
+                  furthest_index: Math.min(
+                    inferFurthestIndex(migratedStep, bp.furthest_index),
+                    maxIdx,
+                  ),
+                });
+                if (bundle.handwriting) setHandwriting(bundle.handwriting);
+                if (bundle.parent_report) setParentReport(bundle.parent_report);
+                await upsertStudentWeek(supabase, {
+                  user_id: user.id,
+                  week_start: weekStart,
+                  progress: bp,
+                  handwriting: bundle.handwriting ?? null,
+                  parent_report: bundle.parent_report ?? null,
+                });
+              }
+            }
+          } catch {
+            /* ignore */
+          }
         }
         if (student?.handwriting) setHandwriting(student.handwriting);
         if (student?.parent_report) setParentReport(student.parent_report as ParentReport);
@@ -1093,10 +1176,6 @@ export function QuestClient({
     if (!spellTarget) return;
     const ok = spellInput.trim() === spellTarget.word;
     const idx = spellTarget.idx;
-    setSpellStats((s) => ({
-      correct: s.correct + (ok ? 1 : 0),
-      total: s.total + 1,
-    }));
     if (ok) {
       setRewardTick((x) => x + 1);
       try {
@@ -1116,6 +1195,11 @@ export function QuestClient({
     setSpellInput("");
 
     setProgress((p) => {
+      const prevStats = p.spelling_stats ?? { correct: 0, total: 0 };
+      const spelling_stats = {
+        correct: prevStats.correct + (ok ? 1 : 0),
+        total: prevStats.total + 1,
+      };
       const base =
         p.weak_word_indices && p.weak_word_indices.length > 0 ?
           p.weak_word_indices
@@ -1129,6 +1213,7 @@ export function QuestClient({
         ...p,
         weak_word_indices: weakArr,
         spelling_mastered: mastered ? true : p.spelling_mastered,
+        spelling_stats,
       };
       void persist({ progress: n });
       if (mastered) setSpellingDone(true);
@@ -1151,7 +1236,10 @@ export function QuestClient({
       generated_at: new Date().toISOString(),
       accuracy_notes: `Word feedback entries: ${total}. Greens: ${greens}.`,
       pronunciation_score,
-      spelling: { correct: spellStats.correct, total: spellStats.total },
+      spelling: {
+        correct: progress.spelling_stats?.correct ?? 0,
+        total: progress.spelling_stats?.total ?? 0,
+      },
       time_spent_sec: p.time_spent_sec || 0,
       handwriting_notes: handwriting?.summary || "No notebook pass yet.",
       practice_words,

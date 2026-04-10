@@ -21,7 +21,15 @@ export interface HomeworkProgress {
   /** Indices still weak for spelling */
   weak_word_indices?: number[];
   spelling_mastered?: boolean;
+  /** Spelling mini-game score (persisted across sessions). */
+  spelling_stats?: { correct: number; total: number };
   time_spent_sec?: number;
+  /** Dictation word grid — survives refresh/logout when saved with homework bundle. */
+  dictation_progress?: {
+    mastered: boolean[];
+    totalAttempts: number;
+    complete: boolean;
+  };
 }
 
 export interface ExtractedHomework {
